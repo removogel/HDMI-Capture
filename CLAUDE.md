@@ -19,11 +19,11 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 | File | Responsibility |
 |---|---|
 | `Sources/main.swift` | NSApplication bootstrap |
-| `Sources/AppDelegate.swift` | Window, auto-hiding HUD controls, menus and shortcuts, settings in `UserDefaults` (`volume`, `swapChannels`, `alwaysOnTop`), recording file names |
-| `Sources/CaptureEngine.swift` | `AVCaptureSession`: picks the video device and mode and the audio device, handles sample buffers, fixes the MS2109 audio, drives level and fps updates |
+| `Sources/AppDelegate.swift` | Window, auto-hiding HUD controls, menus and shortcuts, settings in `UserDefaults` (`volume`, `swapChannels`, `alwaysOnTop`), file names for recordings and screenshots, clipboard |
+| `Sources/CaptureEngine.swift` | `AVCaptureSession`: picks the video device and mode and the audio device, handles sample buffers, fixes the MS2109 audio, grabs still frames (`snapshot`), drives level and fps updates |
 | `Sources/AudioMonitor.swift` | Live audio playback: `AVAudioEngine` + `AVAudioSourceNode` reading a lock-protected ring buffer (target 50 ms, trimmed back above 250 ms) |
 | `Sources/Recorder.swift` | `AVAssetWriter` MP4: H.264 from the capture sample buffers, AAC from rebuilt stereo PCM buffers with gap-free timestamps |
-| `Sources/Views.swift` | `PreviewView` (`AVCaptureVideoPreviewLayer`, mouse/Esc handling) and `LevelMeterView` |
+| `Sources/Views.swift` | `PreviewView` (`AVCaptureVideoPreviewLayer`, mouse/Esc handling), `ShutterView` (screenshot flash, click-through) and `LevelMeterView` |
 | `Tools/MakeIcon.swift` | Draws the 1024 px app icon |
 | `Info.plist` | Bundle ID `local.hdmicapture`, camera/microphone usage strings |
 
@@ -47,6 +47,9 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 
 - Capture callbacks, all `Recorder` access and the stats timer run on the serial `CaptureEngine.queue`.
   UI callbacks (`onLevels`, `onStats`, completions) hop to the main thread via `onMain`.
+- Screenshots: `snapshot()` queues a request on the capture queue; the next video frame is converted to sRGB and
+  encoded as PNG on `snapshotQueue`, so capture and recording don't stall. Requests without a frame within 1 s
+  (no signal) complete with `nil`.
 - `AudioMonitor.push` runs on the capture queue and `render` on the audio thread; they share the ring buffer
   under an `os_unfair_lock`.
 - Compiled with `-swift-version 5` (minimal concurrency checking). Keep new code free of data races anyway.
@@ -56,5 +59,6 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 - UI strings, log messages and code comments are German. README and CLAUDE.md are English.
 - Keep the app dependency-free and buildable with plain `swiftc`. Don't add an Xcode project or SwiftPM
   package unless asked.
-- Recordings go to `~/Movies/HDMI Capture/`, named `HDMI Capture <date> um <time>.mp4`.
+- Recordings go to `~/Movies/HDMI Capture/` (`.mp4`), screenshots to `~/Pictures/HDMI Capture/` (`.png`). Both are
+  named `HDMI Capture <date> um <time>`, with ` 2`, ` 3` … appended if the name already exists.
 - `build/` is ignored by Git; never commit build output.

@@ -16,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let volumeSlider = NSSlider(value: 1, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let meter = LevelMeterView()
     private let fullscreenButton = NSButton(title: "", target: nil, action: nil)
+    private let snapshotButton = NSButton(title: "", target: nil, action: nil)
+    private let shutter = ShutterView(frame: .zero)
 
     private var hideTimer: Timer?
     private var recTimer: Timer?
@@ -96,6 +98,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         recordButton.action = #selector(toggleRecording(_:))
         recordButton.imagePosition = .imageLeading
         recordButton.contentTintColor = .systemRed
+        snapshotButton.target = self
+        snapshotButton.action = #selector(takeSnapshot(_:))
+        snapshotButton.image = NSImage(systemSymbolName: "camera", accessibilityDescription: "Bildschirmfoto")
+        snapshotButton.imagePosition = .imageOnly
+        snapshotButton.toolTip = "Bildschirmfoto sichern (⌘S)"
         swapBox.target = self
         swapBox.action = #selector(toggleSwap(_:))
         swapBox.state = defaults.bool(forKey: "swapChannels") ? .on : .off
@@ -115,7 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         speaker.contentTintColor = .secondaryLabelColor
         meter.toolTip = "Pegel links / rechts"
 
-        let stack = NSStackView(views: [recordButton, Self.divider(), swapBox, speaker, volumeSlider, meter,
+        let stack = NSStackView(views: [recordButton, snapshotButton, Self.divider(), swapBox, speaker, volumeSlider, meter,
                                         Self.divider(), pinBox, fullscreenButton])
         stack.orientation = .horizontal
         stack.alignment = .centerY
@@ -129,10 +136,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         Self.style(statusPill, radius: 8)
         statusPill.addSubview(statusLabel)
 
-        for view in [preview, controls, statusPill, stack, statusLabel, meter, volumeSlider] as [NSView] {
+        for view in [preview, shutter, controls, statusPill, stack, statusLabel, meter, volumeSlider] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
         }
         content.addSubview(preview)
+        content.addSubview(shutter)
         content.addSubview(controls)
         content.addSubview(statusPill)
 
@@ -141,6 +149,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             preview.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             preview.topAnchor.constraint(equalTo: content.topAnchor),
             preview.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            shutter.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            shutter.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            shutter.topAnchor.constraint(equalTo: content.topAnchor),
+            shutter.bottomAnchor.constraint(equalTo: content.bottomAnchor),
 
             stack.leadingAnchor.constraint(equalTo: controls.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: controls.trailingAnchor),
@@ -288,7 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         } else {
             let url: URL
             do {
-                url = try Self.newRecordingURL()
+                url = try Self.newFileURL(in: Self.recordingsFolder(), ext: "mp4")
             } catch {
                 flash("Ordner „Filme“ nicht beschreibbar")
                 recordButton.isEnabled = true
@@ -314,6 +326,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc func showRecordings(_ sender: Any?) {
         if let folder = try? Self.recordingsFolder() { NSWorkspace.shared.open(folder) }
+    }
+
+    @objc func showSnapshots(_ sender: Any?) {
+        if let folder = try? Self.snapshotsFolder() { NSWorkspace.shared.open(folder) }
+    }
+
+    @objc func takeSnapshot(_ sender: Any?) {
+        engine.snapshot { [weak self] snapshot in
+            guard let self else { return }
+            guard let snapshot else {
+                self.flash("Kein Bild für ein Bildschirmfoto")
+                return
+            }
+            self.shutter.flash()
+            do {
+                let url = try Self.newFileURL(in: Self.snapshotsFolder(), ext: "png")
+                try snapshot.png.write(to: url)
+                self.flash("Bildschirmfoto: \(url.lastPathComponent)")
+            } catch {
+                self.flash("Bildschirmfoto nicht gespeichert: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    @objc func copySnapshot(_ sender: Any?) {
+        engine.snapshot { [weak self] snapshot in
+            guard let self else { return }
+            guard let snapshot else {
+                self.flash("Kein Bild zum Kopieren")
+                return
+            }
+            self.shutter.flash()
+            let item = NSPasteboardItem()
+            item.setData(snapshot.png, forType: .png)
+            if let tiff = NSImage(cgImage: snapshot.image, size: .zero).tiffRepresentation {
+                item.setData(tiff, forType: .tiff)
+            }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects([item])
+            self.flash("Bild in die Zwischenablage kopiert")
+        }
     }
 
     @objc func toggleSwap(_ sender: Any?) {
@@ -345,17 +398,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Dateien
 
-    private static func recordingsFolder() throws -> URL {
-        let movies = try FileManager.default.url(for: .moviesDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        let folder = movies.appendingPathComponent("HDMI Capture", isDirectory: true)
+    /// Unterordner „HDMI Capture“ in Filme bzw. Bilder
+    private static func appFolder(_ directory: FileManager.SearchPathDirectory) throws -> URL {
+        let base = try FileManager.default.url(for: directory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let folder = base.appendingPathComponent("HDMI Capture", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder
     }
 
-    private static func newRecordingURL() throws -> URL {
+    private static func recordingsFolder() throws -> URL { try appFolder(.moviesDirectory) }
+    private static func snapshotsFolder() throws -> URL { try appFolder(.picturesDirectory) }
+
+    /// „HDMI Capture 2026-10-23 um 21.55.12.png“; existiert der Name schon, wird „ 2“, „ 3“ … angehängt.
+    private static func newFileURL(in folder: URL, ext: String) -> URL {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd 'um' HH.mm.ss"
-        return try recordingsFolder().appendingPathComponent("HDMI Capture \(formatter.string(from: Date())).mp4")
+        let base = "HDMI Capture \(formatter.string(from: Date()))"
+        var url = folder.appendingPathComponent("\(base).\(ext)")
+        var number = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = folder.appendingPathComponent("\(base) \(number).\(ext)")
+            number += 1
+        }
+        return url
     }
 
     // MARK: - Menü
@@ -386,7 +451,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             record.target = self
             record.tag = 1
             m.addItem(.separator())
+            m.addItem(withTitle: "Bildschirmfoto sichern", action: #selector(takeSnapshot(_:)), keyEquivalent: "s").target = self
+            m.addItem(withTitle: "Bild kopieren", action: #selector(copySnapshot(_:)), keyEquivalent: "c").target = self
+            m.addItem(.separator())
             m.addItem(withTitle: "Aufnahmeordner zeigen", action: #selector(showRecordings(_:)), keyEquivalent: "").target = self
+            m.addItem(withTitle: "Bildschirmfotos zeigen", action: #selector(showSnapshots(_:)), keyEquivalent: "").target = self
         }
         _ = submenu("Ton") { m in
             let swap = m.addItem(withTitle: "Links/Rechts tauschen", action: #selector(toggleSwap(_:)), keyEquivalent: "l")

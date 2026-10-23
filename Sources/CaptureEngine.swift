@@ -1,6 +1,9 @@
 import AVFoundation
+import CoreImage
 import CoreMedia
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 /// Schreibt Diagnosezeilen nach stderr (nicht ins System-Log).
 func debugLog(_ text: String) {
@@ -11,6 +14,12 @@ struct VideoMode {
     let device: AVCaptureDevice
     let format: AVCaptureDevice.Format?
     let range: AVFrameRateRange?
+}
+
+/// Ein Standbild aus dem Videostrom in voller Auflösung, als Bild und fertig kodiertes PNG.
+struct Snapshot {
+    let image: CGImage
+    let png: Data
 }
 
 /// Holt Bild und Ton von der Capture-Karte, wählt den flüssigen MJPEG-Modus (420v)
@@ -27,6 +36,13 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private let audioOutput = AVCaptureAudioDataOutput()
     private var mode: VideoMode?
     private var timer: DispatchSourceTimer?
+    private let snapshotQueue = DispatchQueue(label: "local.hdmicapture.snapshot", qos: .userInitiated)
+    private let ciContext = CIContext(options: [.cacheIntermediates: false])
+
+    private struct SnapshotRequest {
+        let time: TimeInterval
+        let done: @MainActor (Snapshot?) -> Void
+    }
 
     // Nur auf `queue` benutzt
     private var swapLR = false
@@ -40,6 +56,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private var peakR: Float = 0
     private var audioInfo = "kein Ton"
     private var recorder: Recorder?
+    private var snapshotRequests: [SnapshotRequest] = []
 
     // MARK: Start / Stopp
 
@@ -188,6 +205,47 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
     }
 
+    // MARK: Standbild
+
+    /// Liefert das nächste Videobild als Standbild – oder nil, wenn binnen 1 s kein Bild kommt.
+    func snapshot(completion: @escaping @MainActor (Snapshot?) -> Void) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.snapshotRequests.append(SnapshotRequest(time: ProcessInfo.processInfo.systemUptime, done: completion))
+        }
+    }
+
+    /// Wandelt das NV12-Bild in sRGB und kodiert es als PNG – auf eigener Queue, damit die Aufnahme nicht stockt.
+    private func makeSnapshot(from pixelBuffer: CVPixelBuffer, for requests: [SnapshotRequest]) {
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = ciContext
+        snapshotQueue.async {
+            let result: Snapshot?
+            if let srgb = CGColorSpace(name: CGColorSpace.sRGB),
+               let cgImage = context.createCGImage(image, from: image.extent, format: .RGBA8, colorSpace: srgb),
+               let png = Self.pngData(cgImage) {
+                result = Snapshot(image: cgImage, png: png)
+            } else {
+                debugLog("Standbild konnte nicht erzeugt werden")
+                result = nil
+            }
+            for request in requests {
+                let done = request.done
+                Self.onMain { done(result) }
+            }
+        }
+    }
+
+    private static func pngData(_ image: CGImage) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data as CFMutableData, UTType.png.identifier as CFString, 1, nil) else {
+            return nil
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
+    }
+
     private static func onMain(_ work: @escaping @MainActor () -> Void) {
         DispatchQueue.main.async { MainActor.assumeIsolated { work() } }
     }
@@ -197,11 +255,15 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         if output === videoOutput {
             frameCount += 1
-            if let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
-                videoW = CVPixelBufferGetWidth(pixelBuffer)
-                videoH = CVPixelBufferGetHeight(pixelBuffer)
-            }
             recorder?.appendVideo(sampleBuffer)
+            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            videoW = CVPixelBufferGetWidth(pixelBuffer)
+            videoH = CVPixelBufferGetHeight(pixelBuffer)
+            if snapshotRequests.isEmpty == false {
+                let requests = snapshotRequests
+                snapshotRequests.removeAll()
+                makeSnapshot(from: pixelBuffer, for: requests)
+            }
         } else if output === audioOutput {
             handleAudio(sampleBuffer)
         }
@@ -282,6 +344,15 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         if let levels = onLevels { Self.onMain { levels(l, r) } }
 
         let now = ProcessInfo.processInfo.systemUptime
+        if let first = snapshotRequests.first, now - first.time > 1 {
+            // Kein Signal → wartende Standbild-Anfragen abbrechen
+            let requests = snapshotRequests
+            snapshotRequests.removeAll()
+            for request in requests {
+                let done = request.done
+                Self.onMain { done(nil) }
+            }
+        }
         if now - lastStats >= 1 {
             let fps = Double(frameCount) / (now - lastStats)
             frameCount = 0

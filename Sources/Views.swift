@@ -47,6 +47,28 @@ final class PreviewView: NSView {
     }
 }
 
+/// Weiße Fläche, die beim Bildschirmfoto kurz aufblitzt. Lässt alle Mausklicks zur Vorschau durch.
+final class ShutterView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.white.cgColor
+        alphaValue = 0
+    }
+
+    required init?(coder: NSCoder) { fatalError("nicht unterstützt") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func flash() {
+        alphaValue = 0.6
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.35
+            animator().alphaValue = 0
+        }
+    }
+}
+
 /// Zwei waagerechte Pegelbalken (oben links, unten rechts), Skala −60 … 0 dBFS.
 final class LevelMeterView: NSView {
     var levels: (Float, Float) = (0, 0) {
