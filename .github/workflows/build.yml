@@ -1,0 +1,59 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swiftc --version
+
+      - name: Build app
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          bash build.sh 2>&1 | tee build.log
+
+      - name: Report compiler errors
+        if: failure()
+        shell: bash
+        run: |
+          sed -nE 's#^(\./)?([^: ]+\.swift):([0-9]+):([0-9]+): error: (.*)$#::error file=\2,line=\3,col=\4::\5#p' build.log | head -50
+
+      - name: Package
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            ZIP="HDMI-Capture-${GITHUB_REF_NAME#v}.zip"
+          else
+            ZIP="HDMI-Capture-${GITHUB_SHA::7}.zip"
+          fi
+          ditto -c -k --sequesterRsrc --keepParent "build/HDMI Capture.app" "$ZIP"
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+          ls -l "$ZIP"
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$ZIP" \
+            --title "HDMI Capture ${GITHUB_REF_NAME#v}" \
+            --notes-file .github/release-notes.md \
+            --verify-tag

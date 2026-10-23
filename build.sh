@@ -1,15 +1,20 @@
 #!/bin/bash
-# Baut "HDMI Capture.app" im Ordner build/
+# Baut "HDMI Capture.app" als Universal-App (Apple Silicon + Intel) im Ordner build/
+# Optional: VERSION=1.2.0 ./build.sh setzt die Versionsnummer im Info.plist
 set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="build/HDMI Capture.app"
+MIN_MACOS=14.0
 mkdir -p build
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-echo "▸ Kompiliere …"
-swiftc -O -swift-version 5 Sources/*.swift -o "$APP/Contents/MacOS/HDMICapture"
+for arch in arm64 x86_64; do
+    echo "▸ Kompiliere ($arch) …"
+    swiftc -O -swift-version 5 -target "$arch-apple-macos$MIN_MACOS" Sources/*.swift -o "build/HDMICapture-$arch"
+done
+lipo -create build/HDMICapture-arm64 build/HDMICapture-x86_64 -output "$APP/Contents/MacOS/HDMICapture"
 
 if [ ! -f build/AppIcon.icns ]; then
     echo "▸ Erzeuge Icon …"
@@ -29,5 +34,9 @@ fi
 if [ -f build/AppIcon.icns ]; then cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"; fi
 
 cp Info.plist "$APP/Contents/Info.plist"
+if [ -n "${VERSION:-}" ]; then
+    plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Contents/Info.plist"
+    plutil -replace CFBundleVersion -string "$VERSION" "$APP/Contents/Info.plist"
+fi
 codesign --force --sign - "$APP"
-echo "✓ Fertig: $APP"
+echo "✓ Fertig: $APP ($(lipo -archs "$APP/Contents/MacOS/HDMICapture"))"

@@ -8,15 +8,29 @@ A small macOS app for USB HDMI capture sticks based on the MacroSilicon MS2109 c
 - Screenshots of the current frame at full resolution, saved as PNG to `~/Pictures/HDMI Capture/` or copied to the clipboard
 - Swap left/right channels, volume control, level meter, full screen, "Always on top"
 
+## Download
+
+Get the latest version from [Releases](https://github.com/removogel/HDMI-Capture/releases/latest).
+It runs on macOS 14 or newer, on Apple Silicon and Intel Macs. No other software (ffmpeg, SoX …) is needed.
+
+The app is not notarized by Apple, so macOS blocks it the first time you open it. Go to
+**System Settings → Privacy & Security** and click **Open Anyway**, or run:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/HDMI Capture.app"
+```
+
 ## Building
+
+Requires the Xcode Command Line Tools.
 
 ```bash
 ./build.sh
 open "build/HDMI Capture.app"
 ```
 
-On first launch, macOS asks for camera and microphone access. Because the app is only signed locally (ad hoc),
-the prompt may come back after each rebuild.
+`build.sh` produces a universal app (arm64 + x86_64). On first launch, macOS asks for camera and microphone
+access. Because the app is only signed locally (ad hoc), the prompt may come back after each rebuild.
 
 For troubleshooting, start the app directly from Terminal. It then prints the frame rate, audio format and
 buffer level to the terminal every 10 seconds:
