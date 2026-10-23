@@ -20,8 +20,10 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 
 - `.github/workflows/build.yml` runs `build.sh` on `macos-latest` for every push to `main` and every pull request,
   so a green run means the code compiles. Compiler errors are turned into annotations on the check run.
-- Releases: push a tag `vX.Y.Z` on `main`. The workflow builds with `VERSION=X.Y.Z`, zips the app with `ditto`
-  (`HDMI-Capture-X.Y.Z.zip`) and creates the GitHub release with `.github/release-notes.md` as the text.
+- Releases: publish a GitHub release with a tag `vX.Y.Z` (web UI, or
+  `gh release create vX.Y.Z --target main --notes-file .github/release-notes.md`). The `release: published` event
+  builds with `VERSION=X.Y.Z`, zips the app with `ditto` and attaches `HDMI-Capture-X.Y.Z.zip` to the release.
+  Releases created with the workflow's own `GITHUB_TOKEN` don't trigger it.
 - The app is ad-hoc signed, not notarized; the release notes explain how to open it past Gatekeeper.
 
 ## Files

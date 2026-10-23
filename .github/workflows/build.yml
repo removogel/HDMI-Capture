@@ -3,9 +3,9 @@ name: Build
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
-  workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -13,6 +13,8 @@ permissions:
 jobs:
   build:
     runs-on: macos-latest
+    env:
+      TAG: ${{ github.event.release.tag_name }}
     steps:
       - uses: actions/checkout@v5
 
@@ -24,8 +26,8 @@ jobs:
       - name: Build app
         shell: bash
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            export VERSION="${GITHUB_REF_NAME#v}"
+          if [[ -n "$TAG" ]]; then
+            export VERSION="${TAG#v}"
           fi
           bash build.sh 2>&1 | tee build.log
 
@@ -38,8 +40,8 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            ZIP="HDMI-Capture-${GITHUB_REF_NAME#v}.zip"
+          if [[ -n "$TAG" ]]; then
+            ZIP="HDMI-Capture-${TAG#v}.zip"
           else
             ZIP="HDMI-Capture-${GITHUB_SHA::7}.zip"
           fi
@@ -47,13 +49,9 @@ jobs:
           echo "ZIP=$ZIP" >> "$GITHUB_ENV"
           ls -l "$ZIP"
 
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Attach to release
+        if: github.event_name == 'release'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" "$ZIP" \
-            --title "HDMI Capture ${GITHUB_REF_NAME#v}" \
-            --notes-file .github/release-notes.md \
-            --verify-tag
+        run: gh release upload "$TAG" "$ZIP" --clobber
