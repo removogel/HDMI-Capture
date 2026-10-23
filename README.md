@@ -1,36 +1,38 @@
 # HDMI Capture
 
-Kleine macOS-App für USB-HDMI-Capture-Sticks mit MacroSilicon-MS2109-Chip.
+A small macOS app for USB HDMI capture sticks based on the MacroSilicon MS2109 chip.
 
-- Live-Bild in 1920×1080 mit 30 fps (wählt den MJPEG-Modus der Karte statt des 5-fps-Standardmodus)
-- Echter Stereoton: Der Chip meldet 96 kHz mono, liefert aber 48 kHz stereo – die App deutet das richtig
-- Aufnahme als MP4 (H.264 per Hardware, AAC-Stereo) nach `~/Movies/HDMI Capture/`
-- L/R-Tausch, Lautstärke, Pegelanzeige, Vollbild, „Immer im Vordergrund“
+- Live picture at 1920×1080 and 30 fps (uses the card's MJPEG mode instead of the 5 fps default mode)
+- True stereo audio: the chip reports 96 kHz mono but actually delivers 48 kHz stereo, and the app interprets it correctly
+- Recording to MP4 (hardware H.264, AAC stereo) in `~/Movies/HDMI Capture/`
+- Swap left/right channels, volume control, level meter, full screen, "Always on top"
 
-## Bauen
+## Building
 
 ```bash
 ./build.sh
 open "build/HDMI Capture.app"
 ```
 
-Beim ersten Start fragt macOS nach Kamera- und Mikrofonzugriff. Weil die App nur lokal signiert ist,
-kann die Abfrage nach jedem Neubau wiederkommen.
+On first launch, macOS asks for camera and microphone access. Because the app is only signed locally (ad hoc),
+the prompt may come back after each rebuild.
 
-Zum Fehlersuchen die App direkt aus dem Terminal starten – sie schreibt dann alle 10 Sekunden
-Bildrate, Tonformat und Puffer ins Terminal:
+For troubleshooting, start the app directly from Terminal. It then prints the frame rate, audio format and
+buffer level to the terminal every 10 seconds:
 
 ```bash
 "build/HDMI Capture.app/Contents/MacOS/HDMICapture"
 ```
 
-## Tastenkürzel
+## Keyboard shortcuts
 
-| Kürzel | Funktion |
+| Shortcut | Action |
 |---|---|
-| ⌘R | Aufnahme starten / beenden |
-| ⌘L | Links/Rechts tauschen |
-| ⌘↑ / ⌘↓ | Lauter / leiser |
-| ⌃⌘F, Doppelklick | Vollbild |
-| Esc | Vollbild beenden |
-| ⌘T | Immer im Vordergrund |
+| ⌘R | Start / stop recording |
+| ⌘L | Swap left/right channels |
+| ⌘↑ / ⌘↓ | Volume up / down |
+| ⌃⌘F, double-click | Full screen |
+| Esc | Exit full screen |
+| ⌘T | Always on top |
+
+The app's user interface is in German.
