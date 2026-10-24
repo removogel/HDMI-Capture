@@ -19,7 +19,7 @@ final class Recorder {
     private var audioRate: Double = 0
     private var nextAudioPTS = CMTime.invalid
 
-    init(url: URL, width: Int, height: Int) throws {
+    init(url: URL, width: Int, height: Int, bitRate: Int) throws {
         self.url = url
         writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
         videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
@@ -27,7 +27,7 @@ final class Recorder {
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: 10_000_000,
+                AVVideoAverageBitRateKey: bitRate,
                 AVVideoMaxKeyFrameIntervalKey: 60,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
             ] as [String: Any]

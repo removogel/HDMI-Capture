@@ -46,7 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func applicationDidFinishLaunching(_ notification: Notification) {
         defaults.register(defaults: ["volume": 1.0, "swapChannels": false, "alwaysOnTop": false,
                                      "streamAllowedNetworks": NetworkAccessList.defaultText,
-                                     "dashSegmentFrames": StreamSettings.defaultSegmentFrames])
+                                     "dashSegmentFrames": StreamSettings.defaultSegmentFrames,
+                                     "streamBitRate": StreamSettings.defaultBitRate,
+                                     "recordingBitRate": StreamSettings.defaultBitRate])
         buildMenu()
         buildWindow()
 
@@ -382,7 +384,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 recordButton.isEnabled = true
                 return
             }
-            engine.startRecording(to: url) { [weak self] error in
+            let bitRate = StreamSettings.validMbits(defaults.integer(forKey: "recordingBitRate")) * 1_000_000
+            engine.startRecording(to: url, bitRate: bitRate) { [weak self] error in
                 guard let self else { return }
                 self.recordButton.isEnabled = true
                 if let error {
@@ -419,7 +422,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard streamStarting == false else { return }
         streamStarting = true
         streamButton.isEnabled = false
-        let settings = StreamSettings(segmentFrames: defaults.integer(forKey: "dashSegmentFrames"))
+        let settings = StreamSettings(segmentFrames: defaults.integer(forKey: "dashSegmentFrames"),
+                                      videoMbits: defaults.integer(forKey: "streamBitRate"))
         engine.startStreaming(accessList: accessList, settings: settings) { [weak self] result in
             guard let self else { return }
             self.streamStarting = false
@@ -429,7 +433,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.isStreaming = true
                 self.streamAddresses = addresses
                 self.viewers = 0
-                self.flash("Stream läuft – DASH-Segmente \(StreamSettings.label(frames: settings.segmentFrames))")
+                self.flash("Stream läuft – \(settings.videoBitRate / 1_000_000) Mbit/s, "
+                           + "DASH-Segmente \(StreamSettings.label(frames: settings.segmentFrames))")
             case .failure(let error):
                 self.flash("Stream nicht gestartet: \(error.localizedDescription)", seconds: 10)
             }
@@ -481,7 +486,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func showSettings(_ sender: Any?) {
         if settingsController == nil {
             let controller = SettingsWindowController(text: defaults.string(forKey: "streamAllowedNetworks") ?? NetworkAccessList.defaultText,
-                                                      segmentFrames: defaults.integer(forKey: "dashSegmentFrames"))
+                                                      segmentFrames: defaults.integer(forKey: "dashSegmentFrames"),
+                                                      streamMbits: defaults.integer(forKey: "streamBitRate"),
+                                                      recordingMbits: defaults.integer(forKey: "recordingBitRate"))
             controller.onChange = { [weak self] text in
                 guard let self else { return }
                 self.defaults.set(text, forKey: "streamAllowedNetworks")
@@ -493,6 +500,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.defaults.set(frames, forKey: "dashSegmentFrames")
                 if self.isStreaming {
                     self.flash("Neue Segmentlänge gilt ab dem nächsten Start des Streams")
+                }
+            }
+            controller.onStreamBitRateChange = { [weak self] mbits in
+                guard let self else { return }
+                self.defaults.set(mbits, forKey: "streamBitRate")
+                if self.isStreaming {
+                    self.flash("Neue Stream-Bitrate gilt ab dem nächsten Start des Streams")
+                }
+            }
+            controller.onRecordingBitRateChange = { [weak self] mbits in
+                guard let self else { return }
+                self.defaults.set(mbits, forKey: "recordingBitRate")
+                if self.isRecording {
+                    self.flash("Neue Aufnahme-Bitrate gilt ab der nächsten Aufnahme")
                 }
             }
             settingsController = controller

@@ -99,6 +99,8 @@ final class RTSPServer {
 
     var mediaTimeNow: () -> Double? = { nil }
     var onSessionsChanged: (() -> Void)?
+    /// Ab so vielen unbestätigten Bytes gilt ein Zuschauer als zu langsam
+    var slowClientBytes = 4_000_000
     /// Darf diese Gegenstelle zugreifen? Abgelehnte Verbindungen werden sofort geschlossen.
     var isAllowed: (NWEndpoint) -> Bool = { _ in true }
     var onRejected: ((NWEndpoint) -> Void)?
@@ -428,7 +430,7 @@ final class RTSPSession {
             waitingForKeyframe = false
         }
         // Zu langsamer Client: bis zum nächsten Keyframe aussetzen
-        if pendingBytes > 4_000_000 {
+        if pendingBytes > server.slowClientBytes {
             waitingForKeyframe = true
             return
         }

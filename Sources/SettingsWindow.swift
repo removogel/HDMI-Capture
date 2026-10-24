@@ -1,30 +1,36 @@
 import AppKit
 
-/// Einstellungen für den Stream: freigegebene Netze (gilt sofort) und DASH-Segmentlänge (gilt beim nächsten Start).
+/// Einstellungen: freigegebene Netze (gilt sofort), DASH-Segmentlänge und Stream-Bitrate (beim nächsten Streamstart),
+/// Aufnahme-Bitrate (bei der nächsten Aufnahme).
 final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
     /// Neuer Text der Zugriffsliste
     var onChange: ((String) -> Void)?
     /// Neue DASH-Segmentlänge in Bildern
     var onSegmentChange: ((Int) -> Void)?
+    /// Neue Videobitraten in Mbit/s
+    var onStreamBitRateChange: ((Int) -> Void)?
+    var onRecordingBitRateChange: ((Int) -> Void)?
 
     private var textView: NSTextView!
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let segmentPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let streamBitRatePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let recordingBitRatePopup = NSPopUpButton(frame: .zero, pullsDown: false)
 
-    init(text: String, segmentFrames: Int) {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 500),
+    init(text: String, segmentFrames: Int, streamMbits: Int, recordingMbits: Int) {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 640),
                               styleMask: [.titled, .closable],
                               backing: .buffered, defer: false)
         window.title = "Einstellungen"
         window.isReleasedWhenClosed = false
         super.init(window: window)
-        buildContent(text: text, segmentFrames: segmentFrames)
+        buildContent(text: text, segmentFrames: segmentFrames, streamMbits: streamMbits, recordingMbits: recordingMbits)
         window.center()
     }
 
     required init?(coder: NSCoder) { fatalError("nicht unterstützt") }
 
-    private func buildContent(text: String, segmentFrames: Int) {
+    private func buildContent(text: String, segmentFrames: Int, streamMbits: Int, recordingMbits: Int) {
         guard let content = window?.contentView else { return }
 
         let title = NSTextField(labelWithString: "Stream: Zugriff erlauben aus")
@@ -62,7 +68,7 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
         dashTitle.font = .boldSystemFont(ofSize: 13)
         for frames in StreamSettings.segmentChoices {
             var itemTitle = StreamSettings.label(frames: frames)
-            if frames == 16 { itemTitle += " – geringste Verzögerung, 8 Mbit/s" }
+            if frames == 16 { itemTitle += " – geringste Verzögerung" }
             if frames == StreamSettings.defaultSegmentFrames { itemTitle += " (Standard)" }
             if frames == 64 { itemTitle += " – robuster bei schwachem WLAN" }
             segmentPopup.addItem(withTitle: itemTitle)
@@ -78,8 +84,36 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
         dashExplanation.font = .systemFont(ofSize: 11)
         dashExplanation.textColor = .secondaryLabelColor
 
+        // Videobitraten
+        let bitRateSeparator = NSBox()
+        bitRateSeparator.boxType = .separator
+        let bitRateTitle = NSTextField(labelWithString: "Videobitrate (H.264)")
+        bitRateTitle.font = .boldSystemFont(ofSize: 13)
+        for (popup, value) in [(streamBitRatePopup, streamMbits), (recordingBitRatePopup, recordingMbits)] {
+            for mbits in StreamSettings.bitRateChoices {
+                var itemTitle = "\(mbits) Mbit/s"
+                if mbits == StreamSettings.defaultBitRate { itemTitle += " (Standard)" }
+                popup.addItem(withTitle: itemTitle)
+                popup.lastItem?.tag = mbits
+            }
+            popup.selectItem(withTag: StreamSettings.validMbits(value))
+            popup.target = self
+            popup.action = #selector(bitRateChanged(_:))
+        }
+        let bitRateGrid = NSGridView(views: [[NSTextField(labelWithString: "Stream:"), streamBitRatePopup],
+                                             [NSTextField(labelWithString: "Aufnahme:"), recordingBitRatePopup]])
+        bitRateGrid.rowSpacing = 8
+        bitRateGrid.columnSpacing = 10
+        let bitRateExplanation = NSTextField(wrappingLabelWithString:
+            "Höhere Bitraten geben ein besseres Bild. Im WLAN sind 16 Mbit/s meist problemlos, 30 Mbit/s eher "
+            + "per Kabel oder bei gutem Empfang. Stream: gilt beim nächsten Start des Streams. "
+            + "Aufnahme: gilt bei der nächsten Aufnahme.")
+        bitRateExplanation.font = .systemFont(ofSize: 11)
+        bitRateExplanation.textColor = .secondaryLabelColor
+
         let stack = NSStackView(views: [title, explanation, scrollView, statusLabel, resetButton,
-                                        separator, dashTitle, segmentPopup, dashExplanation])
+                                        separator, dashTitle, segmentPopup, dashExplanation,
+                                        bitRateSeparator, bitRateTitle, bitRateGrid, bitRateExplanation])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
@@ -94,6 +128,8 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             explanation.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
             dashExplanation.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
+            bitRateExplanation.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
+            bitRateSeparator.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
             separator.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
             statusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
             scrollView.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
@@ -109,6 +145,14 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
 
     @objc private func segmentChanged() {
         onSegmentChange?(segmentPopup.selectedTag())
+    }
+
+    @objc private func bitRateChanged(_ sender: NSPopUpButton) {
+        if sender === streamBitRatePopup {
+            onStreamBitRateChange?(sender.selectedTag())
+        } else {
+            onRecordingBitRateChange?(sender.selectedTag())
+        }
     }
 
     @objc private func resetToDefault() {

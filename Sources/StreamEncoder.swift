@@ -60,22 +60,33 @@ struct StreamSettings {
     static let audioBitRate = 128_000
     static let segmentChoices = [16, 32, 64]
     static let defaultSegmentFrames = 32
+    /// Wählbare Videobitraten in Mbit/s (Stream und Aufnahme)
+    static let bitRateChoices = [5, 8, 16, 30]
+    static let defaultBitRate = 16
     /// Toleranz für Segment- und Keyframe-Grenzen (Rundung der Zeitstempel)
     static let boundaryTolerance = 0.002
 
     let segmentFrames: Int
+    /// Videobitrate in bit/s
+    let videoBitRate: Int
 
-    init(segmentFrames: Int) {
+    init(segmentFrames: Int, videoMbits: Int = StreamSettings.defaultBitRate) {
         self.segmentFrames = Self.segmentChoices.contains(segmentFrames) ? segmentFrames : Self.defaultSegmentFrames
+        videoBitRate = Self.validMbits(videoMbits) * 1_000_000
     }
+
+    /// Ungültige Werte (z. B. aus alten Einstellungen) auf den Standard setzen
+    static func validMbits(_ value: Int) -> Int {
+        bitRateChoices.contains(value) ? value : defaultBitRate
+    }
+
+    /// Ab so vielen unbestätigten Bytes gilt ein Zuschauer als zu langsam: gut 2 s Video, mindestens 4 MB
+    var slowClientBytes: Int { max(4_000_000, videoBitRate / 4) }
 
     var segmentDuration: Double { Double(segmentFrames) / Double(Self.frameRate) }
 
     /// Keyframe-Abstand: teilt die Segmentlänge und ist höchstens gut 1 s, damit TS- und RTSP-Zuschauer schnell einsteigen
     var keyframeInterval: Double { Double(min(segmentFrames, 32)) / Double(Self.frameRate) }
-
-    /// Kurze Segmente bedeuten viele Keyframes – dafür etwas mehr Datenrate
-    var videoBitRate: Int { segmentFrames <= 16 ? 8_000_000 : 6_000_000 }
 
     /// Nummer des Segments, in das ein Zeitpunkt fällt
     func segmentNumber(at time: Double) -> Int {

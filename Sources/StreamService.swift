@@ -29,8 +29,6 @@ enum StreamError: LocalizedError {
 final class StreamService {
     static let httpPort: UInt16 = 8080
     static let rtspPort: UInt16 = 8554
-    /// Ab so vielen unbestätigten Bytes gilt ein Client als zu langsam
-    static let slowClientBytes = 4_000_000
     /// dash.js-Version für den Player auf der Infoseite (von cdn.dashjs.org)
     static let dashJSVersion = "5.2.1"
 
@@ -91,6 +89,7 @@ final class StreamService {
                 http.onRequest = { [weak self] request, connection in self?.route(request, connection) }
                 rtsp.mediaTimeNow = { [weak self] in self?.encoder.mediaTimeNow() }
                 rtsp.onSessionsChanged = { [weak self] in self?.updateViewers() }
+                rtsp.slowClientBytes = encoder.settings.slowClientBytes
                 http.isAllowed = { [weak self] endpoint in self?.accessList.allows(endpoint) ?? false }
                 rtsp.isAllowed = { [weak self] endpoint in self?.accessList.allows(endpoint) ?? false }
                 http.onRejected = { [weak self] endpoint in self?.rejected(endpoint) }
@@ -200,7 +199,7 @@ final class StreamService {
 
     private func send(_ packets: [UInt8], to client: TSClient) {
         // Zu langsamer Client (z. B. schwaches WLAN): bis zum nächsten Keyframe aussetzen
-        if client.connection.pendingBytes > Self.slowClientBytes {
+        if client.connection.pendingBytes > encoder.settings.slowClientBytes {
             client.waitingForKeyframe = true
             return
         }

@@ -31,7 +31,7 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 | File | Responsibility |
 |---|---|
 | `Sources/main.swift` | NSApplication bootstrap |
-| `Sources/AppDelegate.swift` | Window, auto-hiding HUD controls, menus and shortcuts, settings in `UserDefaults` (`volume`, `swapChannels`, `alwaysOnTop`, `streamAllowedNetworks`), file names for recordings and screenshots, clipboard |
+| `Sources/AppDelegate.swift` | Window, auto-hiding HUD controls, menus and shortcuts, settings in `UserDefaults` (`volume`, `swapChannels`, `alwaysOnTop`, `streamAllowedNetworks`, `dashSegmentFrames`, `streamBitRate`, `recordingBitRate`), file names for recordings and screenshots, clipboard |
 | `Sources/CaptureEngine.swift` | `AVCaptureSession`: picks the video device and mode and the audio device, handles sample buffers, fixes the MS2109 audio, grabs still frames (`snapshot`), drives level and fps updates |
 | `Sources/AudioMonitor.swift` | Live audio playback: `AVAudioEngine` + `AVAudioSourceNode` reading a lock-protected ring buffer (target 50 ms, trimmed back above 250 ms) |
 | `Sources/Recorder.swift` | `AVAssetWriter` MP4: H.264 from the capture sample buffers, AAC from rebuilt stereo PCM buffers with gap-free timestamps |
@@ -45,7 +45,7 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 | `Sources/HTTPServer.swift` | Minimal HTTP/1.1 server on Network.framework (keep-alive, delayed responses, endless streams) |
 | `Sources/Bytes.swift` | Big-endian helpers, MPEG-2 CRC-32, header parsing shared by HTTP and RTSP |
 | `Sources/AccessList.swift` | `NetworkAccessList`: parses allowed networks (`192.168.x.x`, CIDR, single IPs, IPv6) and checks remote endpoints |
-| `Sources/SettingsWindow.swift` | Settings window (⌘,): editable access list (applied live), DASH segment length (applied on next stream start) |
+| `Sources/SettingsWindow.swift` | Settings window (⌘,): editable access list (applied live), DASH segment length and stream bit rate (next stream start), recording bit rate (next recording) |
 | `Tools/MakeIcon.swift` | Draws the 1024 px app icon |
 | `Info.plist` | Bundle ID `local.hdmicapture`, camera/microphone/local-network usage strings |
 
@@ -74,7 +74,10 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
   default 32). Multiples of 16 frames = 25 AAC frames, so audio and video segments line up. Keyframes are
   forced at the first frame ≥ each multiple of min(D, 32 frames); segment n covers media time [nD, (n+1)D) and
   is cut at the first keyframe in segment n+1. Boundaries use a 2 ms tolerance (`StreamSettings.boundaryTolerance`)
-  in both encoder and packager. 0.533 s uses 8 Mbit/s, otherwise 6 Mbit/s.
+  in both encoder and packager.
+- Video bit rates: 5 / 8 / 16 / 30 Mbit/s (`StreamSettings.bitRateChoices`, default 16), separately for the
+  stream (UserDefaults `streamBitRate`, applied on next stream start; VideoToolbox average bit rate with a
+  1.5× one-second data-rate cap) and recordings (`recordingBitRate`, passed to `Recorder`).
 - MPD: `minBufferTime` = D, `suggestedPresentationDelay` and `ServiceDescription/Latency@target` = 3D,
   `availabilityStartTime` = wall clock at media time 0.
 - DASH requests for segments up to max(3, 6 s / D) ahead of the newest are held (up to 8 s) instead of
@@ -90,7 +93,8 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
   IPv4. Changing the list closes connections that are no longer allowed. No authentication or encryption.
 - Status page `/`: dash.js player (`StreamService.dashJSVersion`, loaded from cdn.dashjs.org, modern build with legacy fallback; the app itself bundles nothing) with live latency/buffer readout, muted autoplay plus an unmute button, and the address table. Its latency readout is relative to `availabilityStartTime`, which is set when the first encoded frame arrives, so capture/encoding delay (~0.1–0.2 s) isn't included. Page logic was checked in headless Chromium with a dash.js stub; real dash.js playback isn't verified here (no CDN access, no H.264 in Chromium).
 - The app has an Edit menu so text fields work; ⌘C (`copy:`) without a text field copies the current frame.
-- New TS/RTSP viewers start at the next keyframe. A client with more than 4 MB unsent data is paused until the
+- New TS/RTSP viewers start at the next keyframe. A client with more unsent data than max(4 MB, ~2 s of video)
+  (`StreamSettings.slowClientBytes`) is paused until the
   next keyframe (frames are dropped, memory stays bounded).
 - The AAC encoder adds 2112 samples of priming; audio timestamps are shifted back by that amount.
 - Muxer output was checked with ffprobe/ffmpeg via a Python mirror of the logic (TS decode, fMP4 segments, live

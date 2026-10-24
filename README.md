@@ -21,7 +21,7 @@ Click **Stream** in the control bar (or press ⌘K). The addresses appear in the
 
 In VLC (iPad, iPhone, Mac): **Network → Open Network Stream** and enter one of the addresses.
 `http://<mac-ip>:8080/` opens a page with a built-in **dash.js player** (it shows the live latency and buffer level) plus all addresses with "Open in VLC" links. The player loads dash.js 5.2.1 from `cdn.dashjs.org`, so the viewing device needs internet access; the stream itself stays in the local network.
-The stream uses H.264 (about 6 Mbit/s for 1080p30) and AAC stereo. The status shows `LIVE` and the number of viewers.
+The stream uses H.264 at 1080p30 and AAC stereo; the video bit rate is selectable (see below). The status shows `LIVE` and the number of viewers.
 
 macOS may ask whether HDMI Capture may accept incoming network connections or access the local network; allow it.
 
@@ -31,8 +31,15 @@ Settings (⌘,) offers three segment lengths: **0.533 s**, **1.067 s** (default)
 multiples of 16 frames, because 16 frames at 30 fps last exactly as long as 25 AAC frames at 48 kHz, so video
 and audio segments end together. Shorter segments reduce the delay in players that keep a few segments
 behind the live edge (e.g. dash.js); the MPD also announces a latency target of three segments. With
-0.533 s the stream uses 8 Mbit/s instead of 6 Mbit/s because of the more frequent keyframes. Keyframes come
+0.533 s there are twice as many keyframes, so a higher bit rate helps. Keyframes come
 every segment, at most every 1.067 s. A new length takes effect the next time streaming starts.
+
+### Video bit rate
+
+Settings (⌘,) has separate bit rates for the stream and for recordings: **5, 8, 16 (default) or 30 Mbit/s**.
+Higher rates look better; 16 Mbit/s is usually fine over Wi-Fi, 30 Mbit/s is better suited to a cable or
+strong Wi-Fi. The stream bit rate applies the next time streaming starts, the recording bit rate to the next
+recording.
 
 ### Who can watch
 

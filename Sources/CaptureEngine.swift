@@ -227,13 +227,14 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     // MARK: Aufnahme
 
-    func startRecording(to url: URL, completion: @escaping @MainActor (Error?) -> Void) {
+    func startRecording(to url: URL, bitRate: Int, completion: @escaping @MainActor (Error?) -> Void) {
         queue.async { [weak self] in
             guard let self else { return }
             do {
                 self.recorder = try Recorder(url: url,
                                              width: self.videoW > 0 ? self.videoW : 1920,
-                                             height: self.videoH > 0 ? self.videoH : 1080)
+                                             height: self.videoH > 0 ? self.videoH : 1080,
+                                             bitRate: bitRate)
                 Self.onMain { completion(nil) }
             } catch {
                 Self.onMain { completion(error) }
