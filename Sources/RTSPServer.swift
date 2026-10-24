@@ -1,36 +1,65 @@
 import Foundation
 import Network
 
-/// RTP-Pakete für H.264 (RFC 6184) und AAC (RFC 3640, AAC-hbr) sowie RTCP-Sender-Reports
+/// RTP-Pakete für H.264 (RFC 6184), HEVC (RFC 7798) und AAC (RFC 3640, AAC-hbr) sowie RTCP-Sender-Reports
 enum RTP {
     static let maxPayload = 1400
     static let videoPayloadType: UInt8 = 96
     static let audioPayloadType: UInt8 = 97
 
-    /// Nutzdaten eines Bildes: kleine NAL-Units einzeln, große als FU-A-Fragmente
-    static func h264Payloads(_ frame: EncodedVideoFrame, parameters: VideoParameters) -> [[UInt8]] {
+    /// Nutzdaten eines Bildes: kleine NAL-Units einzeln, große als Fragmente (H.264: FU-A, HEVC: FU)
+    static func videoPayloads(_ frame: EncodedVideoFrame, parameters: VideoParameters) -> [[UInt8]] {
         var nalUnits: [[UInt8]] = []
-        if frame.isKeyframe { nalUnits += [parameters.sps, parameters.pps] }
+        if frame.isKeyframe { nalUnits += parameters.parameterSets }
         nalUnits += frame.slices
         var payloads: [[UInt8]] = []
         for nal in nalUnits where nal.isEmpty == false {
             if nal.count <= maxPayload {
                 payloads.append(nal)
-                continue
+            } else if frame.codec == .h264 {
+                payloads += h264Fragments(nal)
+            } else {
+                payloads += hevcFragments(nal)
             }
-            let indicator = (nal[0] & 0xE0) | 28   // FU-A
-            let type = nal[0] & 0x1F
-            var offset = 1
-            while offset < nal.count {
-                let size = min(maxPayload - 2, nal.count - offset)
-                var header = type
-                if offset == 1 { header |= 0x80 }                      // Start
-                if offset + size == nal.count { header |= 0x40 }       // Ende
-                var payload: [UInt8] = [indicator, header]
-                payload += nal[offset..<(offset + size)]
-                payloads.append(payload)
-                offset += size
-            }
+        }
+        return payloads
+    }
+
+    private static func h264Fragments(_ nal: [UInt8]) -> [[UInt8]] {
+        var payloads: [[UInt8]] = []
+        let indicator = (nal[0] & 0xE0) | 28   // FU-A
+        let type = nal[0] & 0x1F
+        var offset = 1
+        while offset < nal.count {
+            let size = min(maxPayload - 2, nal.count - offset)
+            var header = type
+            if offset == 1 { header |= 0x80 }                      // Start
+            if offset + size == nal.count { header |= 0x40 }       // Ende
+            var payload: [UInt8] = [indicator, header]
+            payload += nal[offset..<(offset + size)]
+            payloads.append(payload)
+            offset += size
+        }
+        return payloads
+    }
+
+    /// RFC 7798: 2 Byte Payload-Header (Typ 49 = FU, Layer und TID wie die NAL-Unit), 1 Byte FU-Header
+    private static func hevcFragments(_ nal: [UInt8]) -> [[UInt8]] {
+        guard nal.count > 2 else { return [nal] }
+        var payloads: [[UInt8]] = []
+        let header0 = (nal[0] & 0x81) | (49 << 1)
+        let header1 = nal[1]
+        let type = (nal[0] >> 1) & 0x3F
+        var offset = 2
+        while offset < nal.count {
+            let size = min(maxPayload - 3, nal.count - offset)
+            var fuHeader = type
+            if offset == 2 { fuHeader |= 0x80 }                    // Start
+            if offset + size == nal.count { fuHeader |= 0x40 }     // Ende
+            var payload: [UInt8] = [header0, header1, fuHeader]
+            payload += nal[offset..<(offset + size)]
+            payloads.append(payload)
+            offset += size
         }
         return payloads
     }
@@ -193,7 +222,7 @@ final class RTSPServer {
     func deliverVideo(_ frame: EncodedVideoFrame, parameters: VideoParameters) {
         videoParameters = parameters
         guard sessions.values.contains(where: { $0.isPlaying }) else { return }
-        let payloads = RTP.h264Payloads(frame, parameters: parameters)
+        let payloads = RTP.videoPayloads(frame, parameters: parameters)
         let timestamp = videoTimestamp(at: frame.time)
         for session in sessions.values {
             session.sendVideo(payloads, timestamp: timestamp, isKeyframe: frame.isKeyframe)
@@ -240,13 +269,16 @@ final class RTSPServer {
                      "t=0 0",
                      "a=control:*",
                      "a=range:npt=0-",
-                     "m=video 0 RTP/AVP \(RTP.videoPayloadType)",
-                     "a=rtpmap:\(RTP.videoPayloadType) H264/90000"]
-        if let video = videoParameters {
-            let sps = Data(video.sps).base64EncodedString()
-            let pps = Data(video.pps).base64EncodedString()
-            lines.append("a=fmtp:\(RTP.videoPayloadType) packetization-mode=1;profile-level-id=\(video.profileLevelID);sprop-parameter-sets=\(sps),\(pps)")
+                     "m=video 0 RTP/AVP \(RTP.videoPayloadType)"]
+        let base64 = { (bytes: [UInt8]) -> String in Data(bytes).base64EncodedString() }
+        if let video = videoParameters, video.codec == .hevc {
+            lines.append("a=rtpmap:\(RTP.videoPayloadType) H265/90000")
+            lines.append("a=fmtp:\(RTP.videoPayloadType) sprop-vps=\(base64(video.vps));sprop-sps=\(base64(video.sps));sprop-pps=\(base64(video.pps))")
+        } else if let video = videoParameters {
+            lines.append("a=rtpmap:\(RTP.videoPayloadType) H264/90000")
+            lines.append("a=fmtp:\(RTP.videoPayloadType) packetization-mode=1;profile-level-id=\(video.profileLevelID);sprop-parameter-sets=\(base64(video.sps)),\(base64(video.pps))")
         } else {
+            lines.append("a=rtpmap:\(RTP.videoPayloadType) H264/90000")
             lines.append("a=fmtp:\(RTP.videoPayloadType) packetization-mode=1")
         }
         lines.append("a=control:trackID=0")

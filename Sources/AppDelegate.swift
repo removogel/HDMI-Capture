@@ -1,7 +1,8 @@
 import AppKit
 import AVFoundation
+import CoreImage
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation, NSMenuDelegate {
     private let engine = CaptureEngine()
     private let defaults = UserDefaults.standard
 
@@ -21,11 +22,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let streamButton = NSButton(title: "Stream", target: nil, action: nil)
     private let streamPanel = NSVisualEffectView()
     private let tsField = NSTextField(labelWithString: "")
+    private let hlsField = NSTextField(labelWithString: "")
     private let dashField = NSTextField(labelWithString: "")
     private let rtspField = NSTextField(labelWithString: "")
     private let accessField = NSTextField(labelWithString: "")
+    private let qrView = NSImageView()
+    private let qrTargetControl = NSSegmentedControl(labels: ["VLC", "Browser"], trackingMode: .selectOne,
+                                                     target: nil, action: nil)
+    private var inputMenu: NSMenu?
     private var settingsController: SettingsWindowController?
     private var lastRejectionNotice: [String: Date] = [:]
+    private var deviceObservers: [NSObjectProtocol] = []
 
     private var hideTimer: Timer?
     private var recTimer: Timer?
@@ -35,6 +42,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var streamStarting = false
     private var viewers = 0
     private var streamAddresses: StreamAddresses?
+    /// Was die Capture-Engine zuletzt eingerichtet hat (Geräte, Bildrate)
+    private var activeSetup: CaptureSetup?
     private var modeText = "Waiting for video …"
     private var flashText: String?
     private var flashID = 0
@@ -48,7 +57,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                      "streamAllowedNetworks": NetworkAccessList.defaultText,
                                      "dashSegmentFrames": StreamSettings.defaultSegmentFrames,
                                      "streamBitRate": StreamSettings.defaultBitRate,
-                                     "recordingBitRate": StreamSettings.defaultBitRate])
+                                     "recordingBitRate": StreamSettings.defaultBitRate,
+                                     "frameRate": StreamSettings.defaultFrameRate,
+                                     "streamCodec": VideoCodec.h264.rawValue,
+                                     "recordingCodec": VideoCodec.h264.rawValue,
+                                     "videoDeviceID": "", "audioDeviceID": "",
+                                     "qrTarget": 0])
         buildMenu()
         buildWindow()
 
@@ -60,11 +74,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.updateStatus()
         }
         engine.onStreamRejected = { [weak self] host in self?.noteRejection(host) }
+        engine.onRecordingFailed = { [weak self] url, reason in self?.recordingFailed(url, reason: reason) }
         engine.setSwap(defaults.bool(forKey: "swapChannels"))
         engine.monitor.volume = defaults.float(forKey: "volume")
-        engine.start { [weak self] message in
-            if let message { self?.flash(message, seconds: 10) }
+        engine.start(options: captureOptions) { [weak self] setup in
+            self?.applySetup(setup, announce: false)
         }
+        observeDevices()
 
         activity = ProcessInfo.processInfo.beginActivity(options: [.idleDisplaySleepDisabled, .userInitiated],
                                                          reason: "Live preview of the capture card")
@@ -80,11 +96,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard isRecording else { return .terminateNow }
         // Laufende Aufnahme erst sauber abschließen
-        engine.stopRecording { _ in NSApp.reply(toApplicationShouldTerminate: true) }
+        engine.stopRecording { _, _ in NSApp.reply(toApplicationShouldTerminate: true) }
         return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        deviceObservers.forEach { NotificationCenter.default.removeObserver($0) }
         engine.stopStreaming()
         engine.stop()
         if let activity { ProcessInfo.processInfo.endActivity(activity) }
@@ -121,6 +138,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         recordButton.action = #selector(toggleRecording(_:))
         recordButton.imagePosition = .imageLeading
         recordButton.contentTintColor = .systemRed
+        // Ziffern gleich breit, damit der Knopf beim Hochzählen der Aufnahmedauer nicht zappelt
+        recordButton.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
         snapshotButton.target = self
         snapshotButton.action = #selector(takeSnapshot(_:))
         snapshotButton.image = NSImage(systemSymbolName: "camera", accessibilityDescription: "Screenshot")
@@ -164,36 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         Self.style(statusPill, radius: 8)
         statusPill.addSubview(statusLabel)
 
-        // Adressen des Streams (oben links, nur während des Streams sichtbar)
-        let panelTitle = NSTextField(labelWithString: "Streaming to the local network")
-        panelTitle.font = .systemFont(ofSize: 12, weight: .semibold)
-        panelTitle.textColor = .white
-        var rows: [[NSView]] = []
-        for (name, field) in [("MPEG-TS", tsField), ("MPEG-DASH", dashField), ("RTSP", rtspField)] {
-            let label = NSTextField(labelWithString: name)
-            label.font = .systemFont(ofSize: 11, weight: .medium)
-            label.textColor = .secondaryLabelColor
-            field.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-            field.textColor = .white
-            field.isSelectable = true
-            rows.append([label, field])
-        }
-        let grid = NSGridView(views: rows)
-        grid.rowSpacing = 4
-        grid.columnSpacing = 10
-        let panelHint = NSTextField(labelWithString: "In VLC: Network → Open Network Stream")
-        panelHint.font = .systemFont(ofSize: 11)
-        panelHint.textColor = .secondaryLabelColor
-        accessField.font = .systemFont(ofSize: 11)
-        accessField.textColor = .secondaryLabelColor
-        let panelStack = NSStackView(views: [panelTitle, grid, panelHint, accessField])
-        panelStack.orientation = .vertical
-        panelStack.alignment = .leading
-        panelStack.spacing = 6
-        panelStack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
-        Self.style(streamPanel, radius: 10)
-        streamPanel.addSubview(panelStack)
-        streamPanel.isHidden = true
+        let panelStack = buildStreamPanel()
 
         for view in [preview, shutter, controls, statusPill, stack, statusLabel, meter, volumeSlider,
                      streamPanel, panelStack] as [NSView] {
@@ -245,6 +235,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         updateRecordUI()
     }
 
+    /// Adressen des Streams und QR-Code (oben links, nur während des Streams sichtbar)
+    private func buildStreamPanel() -> NSStackView {
+        let panelTitle = NSTextField(labelWithString: "Streaming to the local network")
+        panelTitle.font = .systemFont(ofSize: 12, weight: .semibold)
+        panelTitle.textColor = .white
+        var rows: [[NSView]] = []
+        for (name, field) in [("MPEG-TS", tsField), ("HLS", hlsField), ("MPEG-DASH", dashField), ("RTSP", rtspField)] {
+            let label = NSTextField(labelWithString: name)
+            label.font = .systemFont(ofSize: 11, weight: .medium)
+            label.textColor = .secondaryLabelColor
+            field.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            field.textColor = .white
+            field.isSelectable = true
+            rows.append([label, field])
+        }
+        let grid = NSGridView(views: rows)
+        grid.rowSpacing = 4
+        grid.columnSpacing = 10
+        let panelHint = NSTextField(labelWithString: "In VLC: Network → Open Network Stream")
+        panelHint.font = .systemFont(ofSize: 11)
+        panelHint.textColor = .secondaryLabelColor
+        accessField.font = .systemFont(ofSize: 11)
+        accessField.textColor = .secondaryLabelColor
+        let addressStack = NSStackView(views: [grid, panelHint, accessField])
+        addressStack.orientation = .vertical
+        addressStack.alignment = .leading
+        addressStack.spacing = 6
+
+        // QR-Code auf weißem Grund (Ruhezone), darunter die Wahl des Ziels
+        let qrSize: CGFloat = 112
+        qrView.imageScaling = .scaleProportionallyUpOrDown
+        qrView.wantsLayer = true
+        qrView.layer?.magnificationFilter = .nearest
+        qrView.layer?.minificationFilter = .nearest
+        qrView.toolTip = "Scan with the iPad or iPhone camera"
+        let qrBackground = NSView()
+        qrBackground.wantsLayer = true
+        qrBackground.layer?.backgroundColor = NSColor.white.cgColor
+        qrBackground.layer?.cornerRadius = 6
+        qrBackground.addSubview(qrView)
+        qrTargetControl.target = self
+        qrTargetControl.action = #selector(qrTargetChanged(_:))
+        qrTargetControl.controlSize = .small
+        qrTargetControl.selectedSegment = min(max(defaults.integer(forKey: "qrTarget"), 0), 1)
+        qrTargetControl.setToolTip("Open the stream in VLC", forSegment: 0)
+        qrTargetControl.setToolTip("Open the player page in Safari", forSegment: 1)
+        let qrCaption = NSTextField(labelWithString: "Scan with the iPad")
+        qrCaption.font = .systemFont(ofSize: 10)
+        qrCaption.textColor = .secondaryLabelColor
+        let qrStack = NSStackView(views: [qrBackground, qrTargetControl, qrCaption])
+        qrStack.orientation = .vertical
+        qrStack.alignment = .centerX
+        qrStack.spacing = 6
+        for view in [qrView, qrBackground] as [NSView] { view.translatesAutoresizingMaskIntoConstraints = false }
+        NSLayoutConstraint.activate([
+            qrView.widthAnchor.constraint(equalToConstant: qrSize),
+            qrView.heightAnchor.constraint(equalToConstant: qrSize),
+            qrView.leadingAnchor.constraint(equalTo: qrBackground.leadingAnchor, constant: 8),
+            qrView.trailingAnchor.constraint(equalTo: qrBackground.trailingAnchor, constant: -8),
+            qrView.topAnchor.constraint(equalTo: qrBackground.topAnchor, constant: 8),
+            qrView.bottomAnchor.constraint(equalTo: qrBackground.bottomAnchor, constant: -8),
+        ])
+
+        let body = NSStackView(views: [addressStack, qrStack])
+        body.orientation = .horizontal
+        body.alignment = .top
+        body.spacing = 16
+
+        let panelStack = NSStackView(views: [panelTitle, body])
+        panelStack.orientation = .vertical
+        panelStack.alignment = .leading
+        panelStack.spacing = 8
+        panelStack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
+        Self.style(streamPanel, radius: 10)
+        streamPanel.addSubview(panelStack)
+        streamPanel.isHidden = true
+        return panelStack
+    }
+
     private static func style(_ view: NSVisualEffectView, radius: CGFloat) {
         view.material = .hudWindow
         view.blendingMode = .withinWindow
@@ -262,6 +331,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         box.widthAnchor.constraint(equalToConstant: 1).isActive = true
         box.heightAnchor.constraint(equalToConstant: 18).isActive = true
         return box
+    }
+
+    /// QR-Code für einen Text, in Bildpunkten passend für Retina-Displays
+    private static func qrImage(for text: String, points: CGFloat) -> NSImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(text.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter.outputImage, output.extent.width > 0 else { return nil }
+        let scale = max(1, floor(points * 2 / output.extent.width))
+        let scaled = output.samplingNearest().transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        guard let image = CIContext().createCGImage(scaled, from: scaled.extent) else { return nil }
+        return NSImage(cgImage: image, size: NSSize(width: scaled.extent.width / 2, height: scaled.extent.height / 2))
     }
 
     func windowDidEnterFullScreen(_ notification: Notification) {
@@ -306,12 +387,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Anzeige
 
+    /// Dauer als „00:12:34“
+    private static func clock(_ seconds: Int) -> String {
+        String(format: "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+    }
+
+    private var recordingSeconds: Int {
+        guard let start = recStart else { return 0 }
+        return max(0, Int(Date().timeIntervalSince(start)))
+    }
+
     private func updateStatus() {
         let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         let text = NSMutableAttributedString()
-        if isRecording, let start = recStart {
-            let t = Int(Date().timeIntervalSince(start))
-            text.append(NSAttributedString(string: String(format: "● REC %02d:%02d:%02d   ", t / 3600, (t / 60) % 60, t % 60),
+        if isRecording, recStart != nil {
+            text.append(NSAttributedString(string: "● REC \(Self.clock(recordingSeconds))   ",
                                            attributes: [.foregroundColor: NSColor.systemRed, .font: font]))
         }
         if isStreaming {
@@ -325,7 +415,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func updateStats(fps: Double, width: Int, height: Int) {
-        modeText = fps < 1 ? "No signal" : "\(width)×\(height) · \(Int(fps.rounded())) fps"
+        if let setup = activeSetup, setup.videoID == nil {
+            modeText = "No capture device"
+        } else {
+            modeText = fps < 1 ? "No signal" : "\(width)×\(height) · \(Int(fps.rounded())) fps"
+        }
         updateStatus()
     }
 
@@ -349,11 +443,143 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func updateRecordUI() {
-        recordButton.title = isRecording ? "Stop" : "Record"
+        recordButton.title = isRecording ? "Stop \(Self.clock(recordingSeconds))" : "Record"
         recordButton.image = NSImage(systemSymbolName: isRecording ? "stop.circle.fill" : "record.circle",
                                      accessibilityDescription: nil)
         updateStatus()
         showControls()
+    }
+
+    // MARK: - Geräte
+
+    private var captureOptions: CaptureOptions {
+        let video = defaults.string(forKey: "videoDeviceID") ?? ""
+        let audio = defaults.string(forKey: "audioDeviceID") ?? ""
+        return CaptureOptions(videoDeviceID: video.isEmpty ? nil : video,
+                              audioDeviceID: audio.isEmpty ? nil : audio,
+                              frameRate: StreamSettings.validFrameRate(defaults.integer(forKey: "frameRate")))
+    }
+
+    private func applySetup(_ setup: CaptureSetup, announce: Bool) {
+        activeSetup = setup
+        if setup.videoID == nil { modeText = "No capture device" }
+        if setup.notes.isEmpty == false {
+            flash(setup.notes.joined(separator: " · "), seconds: 10)
+        } else if announce {
+            let names = [setup.videoName, setup.audioName ?? "no audio"].compactMap { $0 }
+            flash("Input: " + names.joined(separator: " · "))
+        }
+        updateStatus()
+    }
+
+    private func reconfigureCapture(announce: Bool = true) {
+        engine.reconfigure(options: captureOptions) { [weak self] setup in
+            self?.applySetup(setup, announce: announce)
+        }
+    }
+
+    /// Geräte ein- und ausstecken: ohne Bild oder bei Rückkehr des gewählten Geräts neu einrichten
+    private func observeDevices() {
+        let center = NotificationCenter.default
+        deviceObservers.append(center.addObserver(forName: AVCaptureDevice.wasConnectedNotification, object: nil,
+                                                  queue: .main) { [weak self] note in
+            let device = note.object as? AVCaptureDevice
+            MainActor.assumeIsolated { self?.deviceConnected(device) }
+        })
+        deviceObservers.append(center.addObserver(forName: AVCaptureDevice.wasDisconnectedNotification, object: nil,
+                                                  queue: .main) { [weak self] note in
+            let device = note.object as? AVCaptureDevice
+            MainActor.assumeIsolated { self?.deviceDisconnected(device) }
+        })
+    }
+
+    private func deviceConnected(_ device: AVCaptureDevice?) {
+        guard let device, let setup = activeSetup, isRecording == false else { return }
+        let options = captureOptions
+        let isVideo = device.hasMediaType(.video)
+        let wanted = isVideo ? options.videoDeviceID : options.audioDeviceID
+        let missing = isVideo ? setup.videoID == nil : (setup.audioID == nil && options.audioDeviceID != CaptureOptions.noAudio)
+        if missing || device.uniqueID == wanted {
+            reconfigureCapture()
+        }
+    }
+
+    private func deviceDisconnected(_ device: AVCaptureDevice?) {
+        guard let device, let setup = activeSetup else { return }
+        guard device.uniqueID == setup.videoID || device.uniqueID == setup.audioID else { return }
+        if isRecording {
+            flash("“\(device.localizedName)” disconnected", seconds: 10)
+        } else {
+            // Automatisch auf ein anderes Gerät wechseln (oder melden, dass keins mehr da ist)
+            reconfigureCapture()
+        }
+    }
+
+    /// Menü „Input“ bei jedem Öffnen neu aufbauen – so erscheinen gerade angesteckte Geräte
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === inputMenu else { return }
+        menu.removeAllItems()
+        let options = captureOptions
+
+        menu.addItem(.sectionHeader(title: "Video"))
+        let videoAuto = options.videoDeviceID == nil
+        menu.addItem(deviceItem(title: Self.automaticTitle(videoAuto ? activeSetup?.videoName : nil), id: "",
+                                selected: videoAuto, action: #selector(selectVideoDevice(_:))))
+        for (device, title) in Self.titled(CaptureEngine.videoDevices()) {
+            menu.addItem(deviceItem(title: title, id: device.uniqueID, selected: options.videoDeviceID == device.uniqueID,
+                                    action: #selector(selectVideoDevice(_:))))
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "Audio"))
+        let audioAuto = options.audioDeviceID == nil
+        menu.addItem(deviceItem(title: Self.automaticTitle(audioAuto ? activeSetup?.audioName : nil), id: "",
+                                selected: audioAuto, action: #selector(selectAudioDevice(_:))))
+        for (device, title) in Self.titled(CaptureEngine.audioDevices()) {
+            menu.addItem(deviceItem(title: title, id: device.uniqueID, selected: options.audioDeviceID == device.uniqueID,
+                                    action: #selector(selectAudioDevice(_:))))
+        }
+        menu.addItem(deviceItem(title: "No Audio", id: CaptureOptions.noAudio,
+                                selected: options.audioDeviceID == CaptureOptions.noAudio,
+                                action: #selector(selectAudioDevice(_:))))
+    }
+
+    private static func automaticTitle(_ active: String?) -> String {
+        active.map { "Automatic (\($0))" } ?? "Automatic"
+    }
+
+    /// Gleichnamige Geräte (z. B. zwei Sticks „USB Video“) durchnummerieren
+    private static func titled(_ devices: [AVCaptureDevice]) -> [(AVCaptureDevice, String)] {
+        var seen: [String: Int] = [:]
+        var counts: [String: Int] = [:]
+        for device in devices { counts[device.localizedName, default: 0] += 1 }
+        return devices.map { device in
+            let name = device.localizedName
+            guard counts[name, default: 0] > 1 else { return (device, name) }
+            seen[name, default: 0] += 1
+            return (device, "\(name) (\(seen[name, default: 1]))")
+        }
+    }
+
+    private func deviceItem(title: String, id: String, selected: Bool, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.representedObject = id
+        item.state = selected ? .on : .off
+        item.indentationLevel = 1
+        return item
+    }
+
+    @objc func selectVideoDevice(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        defaults.set(id, forKey: "videoDeviceID")
+        reconfigureCapture()
+    }
+
+    @objc func selectAudioDevice(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        defaults.set(id, forKey: "audioDeviceID")
+        reconfigureCapture()
     }
 
     // MARK: - Aktionen
@@ -361,16 +587,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func toggleRecording(_ sender: Any?) {
         recordButton.isEnabled = false
         if isRecording {
-            engine.stopRecording { [weak self] url in
+            engine.stopRecording { [weak self] url, duration in
                 guard let self else { return }
-                self.isRecording = false
-                self.recStart = nil
-                self.recTimer?.invalidate()
-                self.recTimer = nil
-                self.recordButton.isEnabled = true
-                self.updateRecordUI()
+                let length = Self.clock(Int(duration.rounded()))
+                self.endRecordingUI()
                 if let url {
-                    self.flash("Saved: \(url.lastPathComponent)")
+                    self.flash("Saved: \(url.lastPathComponent) (\(length))")
                 } else {
                     self.flash("Recording failed")
                 }
@@ -385,7 +607,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 return
             }
             let bitRate = StreamSettings.validMbits(defaults.integer(forKey: "recordingBitRate")) * 1_000_000
-            engine.startRecording(to: url, bitRate: bitRate) { [weak self] error in
+            let codec = VideoCodec(stored: defaults.string(forKey: "recordingCodec"))
+            let frameRate = StreamSettings.validFrameRate(defaults.integer(forKey: "frameRate"))
+            engine.startRecording(to: url, bitRate: bitRate, codec: codec, frameRate: frameRate) { [weak self] error in
                 guard let self else { return }
                 self.recordButton.isEnabled = true
                 if let error {
@@ -401,7 +625,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    @objc private func recTick() { updateStatus() }
+    private func endRecordingUI() {
+        isRecording = false
+        recStart = nil
+        recTimer?.invalidate()
+        recTimer = nil
+        recordButton.isEnabled = true
+        updateRecordUI()
+    }
+
+    /// Schreibfehler (z. B. Platte voll): Die Datei ist bis zum letzten Fragment abspielbar
+    private func recordingFailed(_ url: URL, reason: String) {
+        guard isRecording else { return }
+        endRecordingUI()
+        flash("Recording stopped: \(reason) – \(url.lastPathComponent) is kept up to that point", seconds: 15)
+    }
+
+    @objc private func recTick() {
+        recordButton.title = "Stop \(Self.clock(recordingSeconds))"
+        updateStatus()
+    }
 
     @objc func showRecordings(_ sender: Any?) {
         if let folder = try? Self.recordingsFolder() { NSWorkspace.shared.open(folder) }
@@ -423,7 +666,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         streamStarting = true
         streamButton.isEnabled = false
         let settings = StreamSettings(segmentFrames: defaults.integer(forKey: "dashSegmentFrames"),
-                                      videoMbits: defaults.integer(forKey: "streamBitRate"))
+                                      videoMbits: defaults.integer(forKey: "streamBitRate"),
+                                      codec: VideoCodec(stored: defaults.string(forKey: "streamCodec")),
+                                      frameRate: defaults.integer(forKey: "frameRate"))
         engine.startStreaming(accessList: accessList, settings: settings) { [weak self] result in
             guard let self else { return }
             self.streamStarting = false
@@ -433,8 +678,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.isStreaming = true
                 self.streamAddresses = addresses
                 self.viewers = 0
-                self.flash("Streaming – \(settings.videoBitRate / 1_000_000) Mbit/s, "
-                           + "DASH segments \(StreamSettings.label(frames: settings.segmentFrames))")
+                self.flash("Streaming – \(settings.codec.shortName) \(settings.videoBitRate / 1_000_000) Mbit/s, "
+                           + "segments \(StreamSettings.label(frames: settings.segmentFrames))")
             case .failure(let error):
                 self.flash("Stream didn't start: \(error.localizedDescription)", seconds: 10)
             }
@@ -454,13 +699,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         streamButton.contentTintColor = isStreaming ? .systemGreen : nil
         if let addresses = streamAddresses {
             tsField.stringValue = addresses.ts
+            hlsField.stringValue = addresses.hls
             dashField.stringValue = addresses.dash
             rtspField.stringValue = addresses.rtsp
         }
+        updateQRCode()
         updateAccessField()
         streamPanel.isHidden = isStreaming == false
         updateStatus()
         showControls()
+    }
+
+    /// QR-Code: VLC-Link zum MPEG-TS-Stream oder die Infoseite mit Player
+    private func updateQRCode() {
+        guard let addresses = streamAddresses else {
+            qrView.image = nil
+            return
+        }
+        let text = qrTargetControl.selectedSegment == 1 ? addresses.page : StreamAddresses.vlcLink(addresses.ts)
+        qrView.image = Self.qrImage(for: text, points: 112)
+    }
+
+    @objc private func qrTargetChanged(_ sender: NSSegmentedControl) {
+        defaults.set(sender.selectedSegment, forKey: "qrTarget")
+        updateQRCode()
     }
 
     // MARK: - Zugriffsliste
@@ -485,10 +747,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc func showSettings(_ sender: Any?) {
         if settingsController == nil {
-            let controller = SettingsWindowController(text: defaults.string(forKey: "streamAllowedNetworks") ?? NetworkAccessList.defaultText,
-                                                      segmentFrames: defaults.integer(forKey: "dashSegmentFrames"),
-                                                      streamMbits: defaults.integer(forKey: "streamBitRate"),
-                                                      recordingMbits: defaults.integer(forKey: "recordingBitRate"))
+            let values = SettingsWindowController.Values(
+                accessList: defaults.string(forKey: "streamAllowedNetworks") ?? NetworkAccessList.defaultText,
+                segmentFrames: defaults.integer(forKey: "dashSegmentFrames"),
+                frameRate: defaults.integer(forKey: "frameRate"),
+                streamCodec: VideoCodec(stored: defaults.string(forKey: "streamCodec")),
+                streamMbits: defaults.integer(forKey: "streamBitRate"),
+                recordingCodec: VideoCodec(stored: defaults.string(forKey: "recordingCodec")),
+                recordingMbits: defaults.integer(forKey: "recordingBitRate"))
+            let controller = SettingsWindowController(values: values)
             controller.onChange = { [weak self] text in
                 guard let self else { return }
                 self.defaults.set(text, forKey: "streamAllowedNetworks")
@@ -500,6 +767,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.defaults.set(frames, forKey: "dashSegmentFrames")
                 if self.isStreaming {
                     self.flash("New segment length applies the next time streaming starts")
+                }
+            }
+            controller.onFrameRateChange = { [weak self] fps in
+                guard let self else { return }
+                self.defaults.set(fps, forKey: "frameRate")
+                self.engine.setFrameRate(fps) { [weak self] applied, note in
+                    guard let self else { return }
+                    if let note {
+                        self.flash(note, seconds: 10)
+                    } else if let applied {
+                        self.flash("Frame rate: \(Int(applied.rounded())) fps")
+                    }
+                }
+            }
+            controller.onStreamCodecChange = { [weak self] codec in
+                guard let self else { return }
+                self.defaults.set(codec.rawValue, forKey: "streamCodec")
+                if self.isStreaming {
+                    self.flash("New stream codec applies the next time streaming starts")
+                }
+            }
+            controller.onRecordingCodecChange = { [weak self] codec in
+                guard let self else { return }
+                self.defaults.set(codec.rawValue, forKey: "recordingCodec")
+                if self.isRecording {
+                    self.flash("New recording codec applies to the next recording")
                 }
             }
             controller.onStreamBitRateChange = { [weak self] mbits in
@@ -668,7 +961,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             m.addItem(withTitle: "Show Recordings Folder", action: #selector(showRecordings(_:)), keyEquivalent: "").target = self
             m.addItem(withTitle: "Show Screenshots Folder", action: #selector(showSnapshots(_:)), keyEquivalent: "").target = self
         }
-        // Bearbeiten: nötig für Textfelder (Einstellungen). ⌘C ohne Textauswahl kopiert das aktuelle Bild.
+        // Edit: nötig für Textfelder (Einstellungen). ⌘C ohne Textauswahl kopiert das aktuelle Bild.
         _ = submenu("Edit") { m in
             m.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
             let redo = m.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
@@ -678,6 +971,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             m.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
             m.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
             m.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        }
+        // Input: Bild- und Tonquelle – wird bei jedem Öffnen aufgebaut (menuNeedsUpdate)
+        inputMenu = submenu("Input") { m in
+            m.delegate = self
         }
         _ = submenu("Stream") { m in
             let toggle = m.addItem(withTitle: "Start Streaming", action: #selector(toggleStreaming(_:)), keyEquivalent: "k")
@@ -713,6 +1010,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        // Geräte nicht mitten in einer Aufnahme wechseln
+        if menuItem.action == #selector(selectVideoDevice(_:)) || menuItem.action == #selector(selectAudioDevice(_:)) {
+            return isRecording == false
+        }
         switch menuItem.tag {
         case 1: menuItem.title = isRecording ? "Stop Recording" : "Start Recording"
         case 2: menuItem.state = defaults.bool(forKey: "swapChannels") ? .on : .off

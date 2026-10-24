@@ -1,6 +1,6 @@
 import Foundation
 
-/// Verpackt H.264 und AAC in einen MPEG-2-Transport-Stream (188-Byte-Pakete).
+/// Verpackt H.264 oder HEVC und AAC in einen MPEG-2-Transport-Stream (188-Byte-Pakete).
 /// Vor jedem Keyframe stehen PAT und PMT, damit neue Zuschauer dort einsteigen können.
 final class TSMuxer {
     private let pmtPID = 0x1000
@@ -16,13 +16,12 @@ final class TSMuxer {
         var out: [UInt8] = []
         if frame.isKeyframe {
             out += psiPacket(pid: 0, section: patSection())
-            out += psiPacket(pid: pmtPID, section: pmtSection())
+            out += psiPacket(pid: pmtPID, section: pmtSection(parameters.codec))
         }
-        // Annex B: Access Unit Delimiter, bei Keyframes SPS/PPS, dann die Slices
-        var elementary: [UInt8] = [0, 0, 0, 1, 0x09, 0xF0]
+        // Annex B: Access Unit Delimiter, bei Keyframes die Parametersätze (HEVC: VPS/SPS/PPS), dann die Slices
+        var elementary: [UInt8] = parameters.codec == .h264 ? [0, 0, 0, 1, 0x09, 0xF0] : [0, 0, 0, 1, 0x46, 0x01, 0x50]
         if frame.isKeyframe {
-            elementary += [0, 0, 0, 1] + parameters.sps
-            elementary += [0, 0, 0, 1] + parameters.pps
+            for unit in parameters.parameterSets { elementary += [0, 0, 0, 1] + unit }
         }
         for nal in frame.slices {
             elementary += [0, 0, 0, 1]
@@ -54,10 +53,13 @@ final class TSMuxer {
                  0x00, 0x01, 0xE0 | UInt8(pmtPID >> 8), UInt8(pmtPID & 0xFF)])
     }
 
-    private func pmtSection() -> [UInt8] {
-        withCRC([0x02, 0xB0, 0x17, 0x00, 0x01, 0xC1, 0x00, 0x00,
+    private func pmtSection(_ codec: VideoCodec) -> [UInt8] {
+        let videoType: UInt8 = codec == .h264 ? 0x1B : 0x24   // H.264 bzw. HEVC
+        // Versionsnummer wechselt mit dem Codec, damit Empfänger die neue PMT übernehmen
+        let version: UInt8 = codec == .h264 ? 0xC1 : 0xC3
+        return withCRC([0x02, 0xB0, 0x17, 0x00, 0x01, version, 0x00, 0x00,
                  0xE0 | UInt8(videoPID >> 8), UInt8(videoPID & 0xFF), 0xF0, 0x00,
-                 0x1B, 0xE0 | UInt8(videoPID >> 8), UInt8(videoPID & 0xFF), 0xF0, 0x00,   // H.264
+                 videoType, 0xE0 | UInt8(videoPID >> 8), UInt8(videoPID & 0xFF), 0xF0, 0x00,
                  0x0F, 0xE0 | UInt8(audioPID >> 8), UInt8(audioPID & 0xFF), 0xF0, 0x00])  // AAC (ADTS)
     }
 

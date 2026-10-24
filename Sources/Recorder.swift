@@ -6,32 +6,50 @@ enum RecorderError: LocalizedError {
     var errorDescription: String? { "Couldn't set up the recording" }
 }
 
-/// Schreibt Video (H.264, Hardware) und den korrigierten Stereoton (AAC) in eine MP4-Datei.
+/// Schreibt Video (H.264 oder HEVC, Hardware) und den korrigierten Stereoton (AAC) in eine MP4-Datei.
+/// Die Datei wird alle 10 s fragmentiert geschrieben: Bricht die Aufnahme ab (Absturz, Stromausfall,
+/// volle Platte), bleibt sie bis zum letzten Fragment abspielbar.
 /// Wird nur von der Capture-Queue aus benutzt.
 final class Recorder {
+    static let fragmentInterval = 10.0
+
     let url: URL
+    /// Schreiben ist fehlgeschlagen (z. B. Platte voll) – Aufruf einmalig auf der Capture-Queue
+    var onFailure: ((String) -> Void)?
     private let writer: AVAssetWriter
     private let videoInput: AVAssetWriterInput
     private let audioInput: AVAssetWriterInput
     private var started = false
+    private var failed = false
     private var startTime = CMTime.invalid
     private var audioFormat: CMAudioFormatDescription?
     private var audioRate: Double = 0
     private var nextAudioPTS = CMTime.invalid
 
-    init(url: URL, width: Int, height: Int, bitRate: Int) throws {
+    init(url: URL, width: Int, height: Int, bitRate: Int, codec: VideoCodec, frameRate: Int) throws {
         self.url = url
         writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
-        videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.h264,
+        writer.movieFragmentInterval = CMTime(seconds: Self.fragmentInterval, preferredTimescale: 600)
+        var compression: [String: Any] = [
+            AVVideoAverageBitRateKey: bitRate,
+            AVVideoMaxKeyFrameIntervalDurationKey: 2,
+            AVVideoExpectedSourceFrameRateKey: frameRate,
+        ]
+        // HEVC: Standardprofil Main (8 Bit)
+        if codec == .h264 { compression[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel }
+        var videoSettings: [String: Any] = [
+            AVVideoCodecKey: codec == .hevc ? AVVideoCodecType.hevc : AVVideoCodecType.h264,
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: bitRate,
-                AVVideoMaxKeyFrameIntervalKey: 60,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
-            ] as [String: Any]
-        ])
+            AVVideoCompressionPropertiesKey: compression
+        ]
+        // Ungültige Einstellungen würden eine Exception auslösen – dann nur mit Bitrate
+        if writer.canApply(outputSettings: videoSettings, forMediaType: .video) == false {
+            debugLog("Recording: video settings not accepted, using defaults")
+            videoSettings[AVVideoCompressionPropertiesKey] = [AVVideoAverageBitRateKey: bitRate]
+        }
+        guard writer.canApply(outputSettings: videoSettings, forMediaType: .video) else { throw RecorderError.setup }
+        videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
         audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -45,26 +63,31 @@ final class Recorder {
         writer.add(audioInput)
     }
 
+    /// Länge der Aufnahme bis zum zuletzt angenommenen Bild
+    private(set) var duration: Double = 0
+
     func appendVideo(_ sampleBuffer: CMSampleBuffer) {
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if started == false {
             guard writer.status == .unknown, writer.startWriting() else {
                 debugLog("Recording failed to start: \(String(describing: writer.error))")
+                reportFailure()
                 return
             }
             writer.startSession(atSourceTime: pts)
             startTime = pts
             started = true
         }
-        guard writer.status == .writing else { return }
-        if videoInput.isReadyForMoreMediaData {
-            videoInput.append(sampleBuffer)
+        guard checkStatus() else { return }
+        if videoInput.isReadyForMoreMediaData, videoInput.append(sampleBuffer) {
+            duration = max(duration, CMTimeGetSeconds(CMTimeSubtract(pts, startTime)))
         }
+        _ = checkStatus()
     }
 
     /// `frames`: verschachtelte Stereo-Samples (Float32).
     func appendAudio(_ frames: [Float], rate: Double, pts: CMTime) {
-        guard started, writer.status == .writing else { return }
+        guard started, checkStatus() else { return }
         let count = frames.count / 2
         guard count > 0 else { return }
 
@@ -97,6 +120,21 @@ final class Recorder {
             }
             done(writer.status == .completed ? url : nil)
         }
+    }
+
+    /// true, solange geschrieben wird; meldet einen Fehler des Writers genau einmal
+    private func checkStatus() -> Bool {
+        if writer.status == .writing { return true }
+        if writer.status == .failed { reportFailure() }
+        return false
+    }
+
+    private func reportFailure() {
+        guard failed == false else { return }
+        failed = true
+        let reason = writer.error?.localizedDescription ?? "unknown error"
+        debugLog("Recording failed: \(String(describing: writer.error))")
+        onFailure?(reason)
     }
 
     private func makeSampleBuffer(_ frames: [Float], count: Int, rate: Double, pts: CMTime) -> CMSampleBuffer? {

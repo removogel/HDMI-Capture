@@ -15,6 +15,8 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 - Ad-hoc signing means macOS may ask for camera/microphone access again after every rebuild.
 - There are no automated tests. Changes to capture, audio or recording have to be checked on real hardware, so
   say clearly what was not verified.
+- `AVAssetWriterInput` raises an exception for output settings it rejects; `Recorder` checks them with
+  `canApply(outputSettings:forMediaType:)` first.
 
 ## CI and releases
 
@@ -31,21 +33,21 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 | File | Responsibility |
 |---|---|
 | `Sources/main.swift` | NSApplication bootstrap |
-| `Sources/AppDelegate.swift` | Window, auto-hiding HUD controls, menus and shortcuts, settings in `UserDefaults` (`volume`, `swapChannels`, `alwaysOnTop`, `streamAllowedNetworks`, `dashSegmentFrames`, `streamBitRate`, `recordingBitRate`), file names for recordings and screenshots, clipboard |
-| `Sources/CaptureEngine.swift` | `AVCaptureSession`: picks the video device and mode and the audio device, handles sample buffers, fixes the MS2109 audio, grabs still frames (`snapshot`), drives level and fps updates |
+| `Sources/AppDelegate.swift` | Window, auto-hiding HUD controls (record button shows the elapsed time), stream panel with QR code, menus and shortcuts (Input menu rebuilt in `menuNeedsUpdate`), device hot-plug handling, settings in `UserDefaults` (`volume`, `swapChannels`, `alwaysOnTop`, `streamAllowedNetworks`, `dashSegmentFrames`, `streamBitRate`, `recordingBitRate`, `frameRate`, `streamCodec`, `recordingCodec`, `videoDeviceID`, `audioDeviceID`, `qrTarget`), file names for recordings and screenshots, clipboard |
+| `Sources/CaptureEngine.swift` | `AVCaptureSession`: device lists and automatic choice, format selection (`chooseFormat`), (re)configuration on `sessionQueue`, sample buffers, audio conversion to stereo (MS2109 fix, mono, multichannel, planar), still frames (`snapshot`), level and fps updates |
 | `Sources/AudioMonitor.swift` | Live audio playback: `AVAudioEngine` + `AVAudioSourceNode` reading a lock-protected ring buffer (target 50 ms, trimmed back above 250 ms) |
-| `Sources/Recorder.swift` | `AVAssetWriter` MP4: H.264 from the capture sample buffers, AAC from rebuilt stereo PCM buffers with gap-free timestamps |
+| `Sources/Recorder.swift` | `AVAssetWriter` MP4: H.264 or HEVC from the capture sample buffers, AAC from rebuilt stereo PCM buffers with gap-free timestamps; fragmented every 10 s (`movieFragmentInterval`) so an interrupted file stays playable; reports writer failures (`onFailure`) |
 | `Sources/Views.swift` | `PreviewView` (`AVCaptureVideoPreviewLayer`, mouse/Esc handling), `ShutterView` (screenshot flash, click-through) and `LevelMeterView` |
-| `Sources/StreamService.swift` | Network stream: wires encoder → TS/DASH/RTSP, HTTP routes, waiting DASH requests, viewer count, local IP, status page with dash.js player |
-| `Sources/StreamEncoder.swift` | `StreamSettings` (segment length, keyframe interval, bit rates) and the encoder: VideoToolbox H.264 (no B-frames, forced keyframes) and AAC-LC via `AVAudioConverter`; media time = seconds since first video frame |
-| `Sources/TSMuxer.swift` | MPEG-2 TS: PAT/PMT before each keyframe, PES with PTS, PCR on video, AAC as ADTS |
-| `Sources/MP4.swift` | fMP4/CMAF boxes: init segments (`avc1`/`avcC`, `mp4a`/`esds`) and media segments (`moof`+`mdat`) |
-| `Sources/DashPackager.swift` | DASH live: segments numbered by media time, separate video/audio adaptation sets, dynamic MPD with latency target |
-| `Sources/RTSPServer.swift` | RTSP server, RTP packetizing (H.264 FU-A, AAC RFC 3640), RTCP sender reports |
+| `Sources/StreamService.swift` | Network stream: wires encoder → TS/HLS/DASH/RTSP, HTTP routes, waiting requests, viewer count, local IP, `StreamAddresses` (incl. VLC links), status page with player |
+| `Sources/StreamEncoder.swift` | `VideoCodec`, `VideoParameters` (parameter sets, hvcC, RFC 6381 codec string), `HEVCConfig`, `StreamSettings` (segment length, keyframe interval, bit rates, codec, frame rate) and the encoder: VideoToolbox H.264/HEVC (no B-frames, forced keyframes, HEVC falls back to H.264) and AAC-LC via `AVAudioConverter`; media time = seconds since first video frame |
+| `Sources/TSMuxer.swift` | MPEG-2 TS: PAT/PMT before each keyframe (stream type 0x1B H.264 / 0x24 HEVC), PES with PTS, PCR on video, AAC as ADTS |
+| `Sources/MP4.swift` | fMP4/CMAF boxes: init segments (`avc1`/`avcC`, `hvc1`/`hvcC`, `mp4a`/`esds`) and media segments (`moof`+`mdat`) |
+| `Sources/DashPackager.swift` | CMAF segments shared by DASH and HLS: numbered by media time, per-track `Timeline` (HLS sequence and discontinuity numbers), dynamic MPD with latency target, HLS master and media playlists |
+| `Sources/RTSPServer.swift` | RTSP server, RTP packetizing (H.264 FU-A, HEVC FU per RFC 7798, AAC RFC 3640), SDP, RTCP sender reports |
 | `Sources/HTTPServer.swift` | Minimal HTTP/1.1 server on Network.framework (keep-alive, delayed responses, endless streams) |
 | `Sources/Bytes.swift` | Big-endian helpers, MPEG-2 CRC-32, header parsing shared by HTTP and RTSP |
 | `Sources/AccessList.swift` | `NetworkAccessList`: parses allowed networks (`192.168.x.x`, CIDR, single IPs, IPv6) and checks remote endpoints |
-| `Sources/SettingsWindow.swift` | Settings window (⌘,): editable access list (applied live), DASH segment length and stream bit rate (next stream start), recording bit rate (next recording) |
+| `Sources/SettingsWindow.swift` | Settings window (⌘,): editable access list (applied live), DASH/HLS segment length, stream codec and bit rate (next stream start), recording codec and bit rate (next recording), frame rate (immediately) |
 | `Tools/MakeIcon.swift` | Draws the 1024 px app icon |
 | `Info.plist` | Bundle ID `local.hdmicapture`, camera/microphone/local-network usage strings |
 
@@ -54,27 +56,43 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 - **Video modes:** the device offers `yuvs` (uncompressed YUY2, only 5 fps at 1080p over USB 2.0) and `420v`
   (MJPEG that macOS decodes to NV12, 1080p at up to 60 fps). The default mode is the slow `yuvs` one. ffmpeg's
   avfoundation input and VLC cannot select `420v` and always end up at 5 fps, which is why this app exists.
-  `CaptureEngine` selects `420v` 1920×1080 @ 30 explicitly and applies the format again after `startRunning()`,
-  because AVFoundation may reset it on start.
+  `CaptureEngine.chooseFormat` picks the format explicitly (resolution up to 1080p first, then the requested
+  30/60 fps, then `420v`) and applies it again after `startRunning()`, because AVFoundation may reset it on start.
+  Frame durations are always taken from the format's ranges – an unsupported value raises an exception.
 - **Audio format:** the descriptor claims 96 kHz mono, but the data is 48 kHz stereo, interleaved. Consecutive
   "mono" samples are L/R pairs. An odd leftover sample is carried into the next buffer (`pending`). Depending on
   how the stream starts, L and R can be swapped; the user toggles that in the UI. The Linux kernel has a quirk
   for the same device (`sound/usb/quirks-table.h`).
+- The MS2109 audio fix is applied when the audio device looks like the MS2109 (`isMS2109Audio`: name
+  `USB Digital Audio`, `MacroSilicon` or `534d:2109` in its IDs) or delivers mono at ≥ 88.2 kHz. Other mono devices are
+  duplicated to both channels, multichannel devices use the first two channels, planar buffers are interleaved.
 - **Sample format:** macOS delivers either Float32 or Int16 depending on the session; both are handled.
 - **Avoid ffmpeg's avfoundation audio input** for this device: it loses about half the samples, which sounds
   like dropouts or heavy distortion. QuickTime and `AVCaptureAudioDataOutput` receive the full stream.
-- Device names: video `USB Video`, audio `USB Digital Audio`. Other devices are only a fallback.
+- Device names: video `USB Video`, audio `USB Digital Audio`. "Automatic" (the default in the Input menu) prefers
+  the MS2109, then any external video device (never the built-in camera). Audio is paired by USB location ID
+  (UVC uniqueID `0x<location><vid><pid>`, assumed to appear in the audio uniqueID – not verified), then by equal
+  name, then `USB Digital Audio`; a microphone is never picked automatically. Selections are stored as uniqueIDs.
 
 ## Streaming
 
-- Ports: HTTP 8080 (`/live.ts`, `/dash/live.mpd`, `/dash/*.m4s`, `/` status page), RTSP 8554 (`rtsp://<ip>:8554/live`).
-- One shared encoder feeds all three formats. Media time 0 is the first video frame; all PTS, RTP timestamps and
-  DASH segment numbers derive from it. Capture timestamps use `session.synchronizationClock`.
-- DASH segment length D = 16, 32 or 64 frames (0.533 / 1.067 / 2.133 s; UserDefaults `dashSegmentFrames`,
-  default 32). Multiples of 16 frames = 25 AAC frames, so audio and video segments line up. Keyframes are
-  forced at the first frame ≥ each multiple of min(D, 32 frames); segment n covers media time [nD, (n+1)D) and
-  is cut at the first keyframe in segment n+1. Boundaries use a 2 ms tolerance (`StreamSettings.boundaryTolerance`)
-  in both encoder and packager.
+- Ports: HTTP 8080 (`/live.ts`, `/hls/live.m3u8` + `/hls/{video,audio}.m3u8`, `/dash/live.mpd`, segments under
+  `/dash/` and `/hls/`, `/` status page), RTSP 8554 (`rtsp://<ip>:8554/live`).
+- One shared encoder feeds all four formats. Media time 0 is the first video frame; all PTS, RTP timestamps and
+  segment numbers derive from it. Capture timestamps use `session.synchronizationClock`. Timing never assumes a
+  frame rate (30/60 fps both work; `StreamSettings.frameRate` is only a hint for VideoToolbox).
+- Codec (`streamCodec`): H.264 High or HEVC Main, applied on next stream start, for all formats. HEVC: TS stream
+  type 0x24 with VPS/SPS/PPS before keyframes, RTP per RFC 7798 with `sprop-vps/sps/pps`, fMP4 `hvc1` with the
+  hvcC from VideoToolbox (array_completeness forced on; `HEVCConfig.build` from the SPS as fallback).
+- Segment length D = 16, 32 or 64 in units of 1/30 s (0.533 / 1.067 / 2.133 s; UserDefaults `dashSegmentFrames`,
+  default 32) for DASH and HLS. Multiples of 16/30 s = 25 AAC frames, so audio and video segments line up (16
+  frames at 30 fps, 32 at 60 fps). Keyframes are forced at the first frame ≥ each multiple of min(D, 1.067 s);
+  segment n covers media time [nD, (n+1)D) and is cut at the first keyframe in segment n+1. Boundaries use a 2 ms
+  tolerance (`StreamSettings.boundaryTolerance`) in both encoder and packager.
+- HLS (version 7, fMP4) lists the same segment files as DASH: master playlist with one video variant and an
+  audio rendition. Media playlists: window max(6, 12 s / D) segments, `TARGETDURATION` = round(D + 1/30 s),
+  HLS sequence numbers counted without gaps, `EXT-X-DISCONTINUITY` after missing segment numbers or a new init
+  segment (versioned `?v=` in `EXT-X-MAP`), `EXT-X-PROGRAM-DATE-TIME` on the first segment (Safari's latency readout).
 - Video bit rates: 5 / 8 / 16 / 30 Mbit/s (`StreamSettings.bitRateChoices`, default 16), separately for the
   stream (UserDefaults `streamBitRate`, applied on next stream start; VideoToolbox average bit rate with a
   1.5× one-second data-rate cap) and recordings (`recordingBitRate`, passed to `Recorder`).
@@ -91,19 +109,25 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
   against `NetworkAccessList` (UserDefaults key `streamAllowedNetworks`, default `192.168.x.x` / `10.x.x.x`);
   others are cancelled before any data is read. Loopback is always allowed, IPv4-mapped IPv6 is treated as
   IPv4. Changing the list closes connections that are no longer allowed. No authentication or encryption.
-- Status page `/`: dash.js player (`StreamService.dashJSVersion`, loaded from cdn.dashjs.org, modern build with legacy fallback; the app itself bundles nothing) with live latency/buffer readout, muted autoplay plus an unmute button, and the address table. Its latency readout is relative to `availabilityStartTime`, which is set when the first encoded frame arrives, so capture/encoding delay (~0.1–0.2 s) isn't included. Page logic was checked in headless Chromium with a dash.js stub; real dash.js playback isn't verified here (no CDN access, no H.264 in Chromium).
+- Status page `/`: nothing plays until the user clicks. "Play with dash.js" loads dash.js (`StreamService.dashJSVersion`, from cdn.dashjs.org, modern build with legacy fallback; the app itself bundles nothing) and starts with sound (muted plus an unmute button only if the browser refuses); "Play natively (HLS)" appears where `canPlayType` reports HLS (Safari) and needs no internet. Live latency/buffer readout for both (HLS via `getStartDate()`), address table with VLC links. The DASH latency readout is relative to `availabilityStartTime`, set when the first encoded frame arrives, so capture/encoding delay (~0.1–0.2 s) isn't included. Page logic was checked in headless Chromium with a dash.js stub and simulated HLS support; real playback isn't verified here (no CDN access, no H.264 in Chromium).
+- Stream panel in the app: addresses and a QR code (CIQRCodeGenerator) with either the VLC link for MPEG-TS or the status page (`qrTarget`). Whether the iOS camera opens `vlc-x-callback://` links is not verified.
 - The app has an Edit menu so text fields work; ⌘C (`copy:`) without a text field copies the current frame.
 - New TS/RTSP viewers start at the next keyframe. A client with more unsent data than max(4 MB, ~2 s of video)
   (`StreamSettings.slowClientBytes`) is paused until the
   next keyframe (frames are dropped, memory stays bounded).
 - The AAC encoder adds 2112 samples of priming; audio timestamps are shifted back by that amount.
 - Muxer output was checked with ffprobe/ffmpeg via a Python mirror of the logic (TS decode, fMP4 segments, live
-  DASH, RTSP with UDP→TCP fallback). Playback in VLC on iPad is not verified here.
+  DASH, RTSP with UDP→TCP fallback; HEVC in TS/fMP4/RTP, hvcC and codec string against ffmpeg, HLS playlists incl.
+  discontinuities read over HTTP). Playback in VLC/Safari on iPad and VideoToolbox's real HEVC output are not
+  verified here.
 
 ## Threading
 
 - Capture callbacks, all `Recorder` access and the stats timer run on the serial `CaptureEngine.queue`.
-  UI callbacks (`onLevels`, `onStats`, completions) hop to the main thread via `onMain`.
+  Session and device configuration (`apply`, `setFrameRate`, `startRunning`) run on the serial `sessionQueue`;
+  values the capture callbacks need (`audioIsMS2109`, `pending`) are handed over with `queue.async`.
+  UI callbacks (`onLevels`, `onStats`, `onRecordingFailed`, completions) hop to the main thread via `onMain`.
+- Devices can't be switched while recording (menu items disabled); the frame rate can (format change only).
 - Screenshots: `snapshot()` queues a request on the capture queue; the next video frame is converted to sRGB and
   encoded as PNG on `snapshotQueue`, so capture and recording don't stall. Requests without a frame within 1 s
   (no signal) complete with `nil`.

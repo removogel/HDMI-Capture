@@ -2,20 +2,45 @@ import AVFoundation
 import CoreMedia
 import VideoToolbox
 
-/// Ein H.264-kodiertes Videobild. `nalUnits` enthält die NAL-Units ohne Start- oder Längencode.
+/// Videocodec für Stream und Aufnahme
+enum VideoCodec: String, CaseIterable {
+    case h264
+    case hevc
+
+    /// Gespeicherten Wert lesen; Unbekanntes wird H.264
+    init(stored: String?) { self = VideoCodec(rawValue: stored ?? "") ?? .h264 }
+
+    var label: String { self == .h264 ? "H.264" : "HEVC (H.265)" }
+    var shortName: String { self == .h264 ? "H.264" : "HEVC" }
+}
+
+/// Ein kodiertes Videobild. `nalUnits` enthält die NAL-Units ohne Start- oder Längencode.
 struct EncodedVideoFrame {
     /// Medienzeit in Sekunden seit Streamstart
     let time: Double
     let isKeyframe: Bool
+    let codec: VideoCodec
     let nalUnits: [[UInt8]]
 
-    /// NAL-Units ohne Parametersätze (SPS/PPS) und Access-Unit-Delimiter
+    /// NAL-Units ohne Parametersätze und Access-Unit-Delimiter
     var slices: [[UInt8]] {
         nalUnits.filter { nal in
-            guard let first = nal.first else { return false }
-            let type = first & 0x1F
-            return type != 7 && type != 8 && type != 9
+            guard let type = NAL.type(nal, codec) else { return false }
+            return NAL.isParameterSetOrDelimiter(type, codec) == false
         }
+    }
+}
+
+/// NAL-Unit-Typen von H.264 und HEVC
+enum NAL {
+    static func type(_ nal: [UInt8], _ codec: VideoCodec) -> Int? {
+        guard let first = nal.first else { return nil }
+        return codec == .h264 ? Int(first & 0x1F) : Int((first >> 1) & 0x3F)
+    }
+
+    /// H.264: SPS 7, PPS 8, AUD 9 – HEVC: VPS 32, SPS 33, PPS 34, AUD 35
+    static func isParameterSetOrDelimiter(_ type: Int, _ codec: VideoCodec) -> Bool {
+        codec == .h264 ? (7...9).contains(type) : (32...35).contains(type)
     }
 }
 
@@ -26,13 +51,107 @@ struct EncodedAudioFrame {
 }
 
 struct VideoParameters: Equatable {
-    let sps: [UInt8]
-    let pps: [UInt8]
+    let codec: VideoCodec
+    /// H.264: SPS, PPS – HEVC: VPS, SPS, PPS (jeweils ohne Start- oder Längencode)
+    let parameterSets: [[UInt8]]
+    /// Inhalt der hvcC-Box (nur HEVC)
+    let hvcC: [UInt8]
     let width: Int
     let height: Int
 
-    /// Profil, Kompatibilität und Level aus dem SPS, z. B. „640028“
+    private func parameterSet(h264 h264Type: Int, hevc hevcType: Int) -> [UInt8] {
+        let wanted = codec == .h264 ? h264Type : hevcType
+        return parameterSets.first { NAL.type($0, codec) == wanted } ?? []
+    }
+
+    var vps: [UInt8] { codec == .hevc ? parameterSet(h264: -1, hevc: 32) : [] }
+    var sps: [UInt8] { parameterSet(h264: 7, hevc: 33) }
+    var pps: [UInt8] { parameterSet(h264: 8, hevc: 34) }
+
+    /// H.264: Profil, Kompatibilität und Level aus dem SPS, z. B. „640028“
     var profileLevelID: String { sps.count >= 4 ? hexString(sps[1...3]) : "640028" }
+
+    /// Codec-Angabe für DASH und HLS (RFC 6381), z. B. „avc1.640028“ oder „hvc1.1.6.L123.B0“
+    var codecString: String {
+        codec == .h264 ? "avc1.\(profileLevelID)" : HEVCConfig.codecString(hvcC)
+    }
+}
+
+/// hvcC (ISO/IEC 14496-15) aus VPS/SPS/PPS bauen und die Codec-Angabe daraus ableiten
+enum HEVCConfig {
+    /// Fallback, falls VideoToolbox keine hvcC liefert: Profil, Tier und Level stehen am Anfang des SPS
+    static func build(vps: [UInt8], sps: [UInt8], pps: [UInt8]) -> [UInt8] {
+        // SPS-RBSP ohne Emulation-Prevention-Bytes; nach dem 2-Byte-NAL-Kopf folgt 1 Byte, dann profile_tier_level
+        let rbsp = removeEmulationPrevention(Array(sps.dropFirst(2)))
+        guard rbsp.count >= 13 else { return [] }
+        var config: [UInt8] = [1]
+        config += rbsp[1...12]                // Profil/Tier, Kompatibilität (4), Constraints (6), Level
+        config += [0xF0, 0x00]                // min_spatial_segmentation_idc = 0
+        config += [0xFC]                      // parallelismType = 0
+        config += [0xFD]                      // chroma_format_idc = 1 (4:2:0)
+        config += [0xF8, 0xF8]                // 8 Bit Luma/Chroma
+        config += [0x00, 0x00]                // avgFrameRate unbekannt
+        config += [0x0F]                      // 1 zeitliche Ebene, verschachtelt, 4-Byte-Längen
+        config += [3]
+        for (type, nal) in [(32, vps), (33, sps), (34, pps)] {
+            config.append(0x80 | UInt8(type))
+            config.appendU16(1)
+            config.appendU16(nal.count)
+            config += nal
+        }
+        return config
+    }
+
+    /// Setzt bei allen NAL-Arrays „array_completeness“: Die Parametersätze stehen nur in der hvcC, nicht im Bild
+    static func markComplete(_ hvcC: [UInt8]) -> [UInt8] {
+        guard hvcC.count > 23 else { return hvcC }
+        var out = hvcC
+        var offset = 23
+        for _ in 0..<Int(hvcC[22]) {
+            guard offset + 3 <= out.count else { return hvcC }
+            out[offset] |= 0x80
+            let count = (Int(out[offset + 1]) << 8) | Int(out[offset + 2])
+            offset += 3
+            for _ in 0..<count {
+                guard offset + 2 <= out.count else { return hvcC }
+                offset += 2 + ((Int(out[offset]) << 8) | Int(out[offset + 1]))
+            }
+        }
+        return offset <= out.count ? out : hvcC
+    }
+
+    static func removeEmulationPrevention(_ bytes: [UInt8]) -> [UInt8] {
+        var out: [UInt8] = []
+        out.reserveCapacity(bytes.count)
+        var zeros = 0
+        for byte in bytes {
+            if zeros >= 2 && byte == 0x03 {
+                zeros = 0
+                continue
+            }
+            zeros = byte == 0 ? zeros + 1 : 0
+            out.append(byte)
+        }
+        return out
+    }
+
+    /// Codec-Angabe nach ISO/IEC 14496-15 Anhang E, z. B. „hvc1.1.6.L123.B0“
+    static func codecString(_ hvcC: [UInt8]) -> String {
+        guard hvcC.count >= 13 else { return "hvc1.1.6.L120.90" }
+        let space = ["", "A", "B", "C"][Int(hvcC[1] >> 6)]
+        let tier = (hvcC[1] & 0x20) != 0 ? "H" : "L"
+        let profile = Int(hvcC[1] & 0x1F)
+        var compatibility: UInt32 = 0
+        for index in 2...5 { compatibility = (compatibility << 8) | UInt32(hvcC[index]) }
+        // Kompatibilitäts-Flags in umgekehrter Bitreihenfolge, hexadezimal ohne führende Nullen
+        var reversed: UInt32 = 0
+        for bit in 0..<32 where (compatibility >> UInt32(bit)) & 1 == 1 { reversed |= 1 << UInt32(31 - bit) }
+        var constraints = Array(hvcC[6...11])
+        while let last = constraints.last, last == 0 { constraints.removeLast() }
+        var result = "hvc1.\(space)\(profile).\(String(reversed, radix: 16, uppercase: true)).\(tier)\(hvcC[12])"
+        for byte in constraints { result += "." + String(format: "%02X", byte) }
+        return result
+    }
 }
 
 struct AudioParameters: Equatable {
@@ -53,26 +172,36 @@ struct AudioParameters: Equatable {
 }
 
 /// Einstellungen, die beim Start eines Streams festgelegt werden.
-/// Die DASH-Segmentlänge ist ein Vielfaches von 16 Bildern (0,533 s): Genau dann enden Bild- und Ton-Segmente
-/// gleichzeitig, denn 16 Bilder bei 30 fps dauern so lang wie 25 AAC-Frames zu 1024 Samples bei 48 kHz.
+/// Die Segmentlänge wird in 1/30 s angegeben („Bilder bei 30 fps“) und ist ein Vielfaches von 16/30 s = 0,533 s:
+/// So lang dauern genau 25 AAC-Frames zu 1024 Samples bei 48 kHz, also enden Bild- und Ton-Segmente gleichzeitig –
+/// bei 30 fps nach 16, bei 60 fps nach 32 Bildern.
 struct StreamSettings {
-    static let frameRate = 30
     static let audioBitRate = 128_000
+    /// Segmentlängen in 1/30 s: 0,533 / 1,067 / 2,133 s
     static let segmentChoices = [16, 32, 64]
     static let defaultSegmentFrames = 32
+    static let frameRateChoices = [30, 60]
+    static let defaultFrameRate = 30
     /// Wählbare Videobitraten in Mbit/s (Stream und Aufnahme)
     static let bitRateChoices = [5, 8, 16, 30]
     static let defaultBitRate = 16
     /// Toleranz für Segment- und Keyframe-Grenzen (Rundung der Zeitstempel)
     static let boundaryTolerance = 0.002
 
+    /// Segmentlänge in 1/30 s
     let segmentFrames: Int
     /// Videobitrate in bit/s
     let videoBitRate: Int
+    let codec: VideoCodec
+    /// Erwartete Bildrate der Quelle (nur ein Hinweis für den Encoder; alle Zeiten kommen aus den Zeitstempeln)
+    let frameRate: Int
 
-    init(segmentFrames: Int, videoMbits: Int = StreamSettings.defaultBitRate) {
+    init(segmentFrames: Int, videoMbits: Int = StreamSettings.defaultBitRate,
+         codec: VideoCodec = .h264, frameRate: Int = StreamSettings.defaultFrameRate) {
         self.segmentFrames = Self.segmentChoices.contains(segmentFrames) ? segmentFrames : Self.defaultSegmentFrames
         videoBitRate = Self.validMbits(videoMbits) * 1_000_000
+        self.codec = codec
+        self.frameRate = Self.validFrameRate(frameRate)
     }
 
     /// Ungültige Werte (z. B. aus alten Einstellungen) auf den Standard setzen
@@ -80,13 +209,17 @@ struct StreamSettings {
         bitRateChoices.contains(value) ? value : defaultBitRate
     }
 
+    static func validFrameRate(_ value: Int) -> Int {
+        frameRateChoices.contains(value) ? value : defaultFrameRate
+    }
+
     /// Ab so vielen unbestätigten Bytes gilt ein Zuschauer als zu langsam: gut 2 s Video, mindestens 4 MB
     var slowClientBytes: Int { max(4_000_000, videoBitRate / 4) }
 
-    var segmentDuration: Double { Double(segmentFrames) / Double(Self.frameRate) }
+    var segmentDuration: Double { Double(segmentFrames) / 30 }
 
     /// Keyframe-Abstand: teilt die Segmentlänge und ist höchstens gut 1 s, damit TS- und RTSP-Zuschauer schnell einsteigen
-    var keyframeInterval: Double { Double(min(segmentFrames, 32)) / Double(Self.frameRate) }
+    var keyframeInterval: Double { Double(min(segmentFrames, 32)) / 30 }
 
     /// Nummer des Segments, in das ein Zeitpunkt fällt
     func segmentNumber(at time: Double) -> Int {
@@ -94,12 +227,11 @@ struct StreamSettings {
     }
 
     static func label(frames: Int) -> String {
-        let seconds = Double(frames) / Double(frameRate)
-        return String(format: "%.3f s", seconds)
+        String(format: "%.3f s", Double(frames) / 30)
     }
 }
 
-/// Kodiert Bild (H.264, Hardware) und Ton (AAC-LC) für den Netzwerk-Stream.
+/// Kodiert Bild (H.264 oder HEVC, Hardware) und Ton (AAC-LC) für den Netzwerk-Stream.
 /// `encodeVideo`/`encodeAudio` laufen auf der Capture-Queue, die Ergebnisse kommen auf `outputQueue`.
 /// Alle Zeiten sind Medienzeit: Sekunden seit dem ersten Videobild.
 final class StreamEncoder {
@@ -204,12 +336,42 @@ final class StreamEncoder {
 
     private func createSession(width: Int, height: Int) {
         invalidate()
+        var codec = settings.codec
+        var created = Self.makeSession(width: width, height: height, codec: codec)
+        if created == nil && codec == .hevc {
+            // Kein HEVC-Encoder (ältere Intel-Macs): mit H.264 weiter
+            debugLog("HEVC encoder not available, falling back to H.264")
+            codec = .h264
+            created = Self.makeSession(width: width, height: height, codec: codec)
+        }
+        guard let created else { return }
+        Self.set(created, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
+        Self.set(created, kVTCompressionPropertyKey_ProfileLevel,
+                 codec == .h264 ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel)
+        // Ohne B-Frames: Dekodier- und Anzeigereihenfolge sind gleich, PTS = DTS
+        Self.set(created, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
+        let bitRate = settings.videoBitRate
+        Self.set(created, kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: bitRate))
+        Self.set(created, kVTCompressionPropertyKey_DataRateLimits,
+                 [NSNumber(value: bitRate * 3 / 2 / 8), NSNumber(value: 1)] as CFArray)
+        Self.set(created, kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: settings.frameRate))
+        Self.set(created, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 4))
+        VTCompressionSessionPrepareToEncodeFrames(created)
+        session = created
+        sessionWidth = width
+        sessionHeight = height
+        nextKeyframe = 0
+        debugLog("Stream encoder: \(codec.shortName) \(width)x\(height), \(bitRate / 1_000_000) Mbit/s, "
+                 + "keyframe every \(StreamSettings.label(frames: min(settings.segmentFrames, 32)))")
+    }
+
+    private static func makeSession(width: Int, height: Int, codec: VideoCodec) -> VTCompressionSession? {
         var created: VTCompressionSession?
         let specification = [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: true] as CFDictionary
         let status = VTCompressionSessionCreate(allocator: nil,
                                                 width: Int32(width),
                                                 height: Int32(height),
-                                                codecType: kCMVideoCodecType_H264,
+                                                codecType: codec == .h264 ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC,
                                                 encoderSpecification: specification,
                                                 imageBufferAttributes: nil,
                                                 compressedDataAllocator: nil,
@@ -217,27 +379,10 @@ final class StreamEncoder {
                                                 refcon: nil,
                                                 compressionSessionOut: &created)
         guard status == noErr, let created else {
-            debugLog("H.264 encoder failed to start: \(status)")
-            return
+            debugLog("\(codec.shortName) encoder failed to start: \(status)")
+            return nil
         }
-        Self.set(created, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
-        Self.set(created, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel)
-        // Ohne B-Frames: Dekodier- und Anzeigereihenfolge sind gleich, PTS = DTS
-        Self.set(created, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
-        let bitRate = settings.videoBitRate
-        Self.set(created, kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: bitRate))
-        Self.set(created, kVTCompressionPropertyKey_DataRateLimits,
-                 [NSNumber(value: bitRate * 3 / 2 / 8), NSNumber(value: 1)] as CFArray)
-        Self.set(created, kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: StreamSettings.frameRate))
-        Self.set(created, kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: StreamSettings.frameRate * 4))
-        Self.set(created, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 4))
-        VTCompressionSessionPrepareToEncodeFrames(created)
-        session = created
-        sessionWidth = width
-        sessionHeight = height
-        nextKeyframe = 0
-        debugLog("Stream encoder: H.264 \(width)x\(height), \(bitRate / 1_000_000) Mbit/s, "
-                 + "keyframe every \(StreamSettings.label(frames: min(settings.segmentFrames, 32)))")
+        return created
     }
 
     private static func set(_ session: VTCompressionSession, _ key: CFString, _ value: CFTypeRef) {
@@ -248,23 +393,17 @@ final class StreamEncoder {
     /// Läuft auf einem Thread von VideoToolbox
     private func handleEncodedVideo(_ sampleBuffer: CMSampleBuffer) {
         guard let format = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let block = CMSampleBufferGetDataBuffer(sampleBuffer),
-              let sps = Self.parameterSet(format, index: 0),
-              let pps = Self.parameterSet(format, index: 1) else { return }
+              let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+        let codec: VideoCodec = CMFormatDescriptionGetMediaSubType(format) == kCMVideoCodecType_HEVC ? .hevc : .h264
+        guard let sets = Self.parameterSets(format, codec: codec), sets.units.count >= (codec == .hevc ? 3 : 2) else { return }
 
-        var headerLength: Int32 = 4
-        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, parameterSetIndex: 0,
-                                                           parameterSetPointerOut: nil,
-                                                           parameterSetSizeOut: nil,
-                                                           parameterSetCountOut: nil,
-                                                           nalUnitHeaderLengthOut: &headerLength)
         let length = CMBlockBufferGetDataLength(block)
         var bytes = [UInt8](repeating: 0, count: length)
         guard CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: &bytes) == kCMBlockBufferNoErr else { return }
 
-        // Längenpräfix-Format (AVCC) in einzelne NAL-Units zerlegen
+        // Längenpräfix-Format (AVCC/HVCC) in einzelne NAL-Units zerlegen
         var nalUnits: [[UInt8]] = []
-        let prefix = Int(headerLength)
+        let prefix = sets.headerLength
         var offset = 0
         while offset + prefix <= length {
             var size = 0
@@ -281,23 +420,60 @@ final class StreamEncoder {
             isKeyframe = notSync == false
         }
         let dimensions = CMVideoFormatDescriptionGetDimensions(format)
-        let parameters = VideoParameters(sps: sps, pps: pps, width: Int(dimensions.width), height: Int(dimensions.height))
+        var hvcC: [UInt8] = []
+        if codec == .hevc {
+            hvcC = HEVCConfig.markComplete(Self.configurationAtom(format, "hvcC"))
+            if hvcC.isEmpty {
+                let units = sets.units
+                let find = { (type: Int) -> [UInt8] in units.first { NAL.type($0, .hevc) == type } ?? [] }
+                hvcC = HEVCConfig.build(vps: find(32), sps: find(33), pps: find(34))
+            }
+        }
+        let parameters = VideoParameters(codec: codec, parameterSets: sets.units, hvcC: hvcC,
+                                         width: Int(dimensions.width), height: Int(dimensions.height))
         let frame = EncodedVideoFrame(time: CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)),
                                       isKeyframe: isKeyframe,
+                                      codec: codec,
                                       nalUnits: nalUnits)
         outputQueue.async { [weak self] in self?.onVideo?(frame, parameters) }
     }
 
-    private static func parameterSet(_ format: CMFormatDescription, index: Int) -> [UInt8]? {
-        var pointer: UnsafePointer<UInt8>?
-        var size = 0
-        let status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, parameterSetIndex: index,
-                                                                        parameterSetPointerOut: &pointer,
-                                                                        parameterSetSizeOut: &size,
-                                                                        parameterSetCountOut: nil,
-                                                                        nalUnitHeaderLengthOut: nil)
-        guard status == noErr, let pointer, size > 0 else { return nil }
-        return Array(UnsafeBufferPointer(start: pointer, count: size))
+    /// Alle Parametersätze (H.264: SPS, PPS – HEVC: VPS, SPS, PPS) und die Länge der NAL-Längenpräfixe
+    private static func parameterSets(_ format: CMFormatDescription, codec: VideoCodec) -> (units: [[UInt8]], headerLength: Int)? {
+        var count = 0
+        var headerLength: Int32 = 4
+        let probe = codec == .h264
+            ? CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, parameterSetIndex: 0, parameterSetPointerOut: nil,
+                                                                 parameterSetSizeOut: nil, parameterSetCountOut: &count,
+                                                                 nalUnitHeaderLengthOut: &headerLength)
+            : CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format, parameterSetIndex: 0, parameterSetPointerOut: nil,
+                                                                 parameterSetSizeOut: nil, parameterSetCountOut: &count,
+                                                                 nalUnitHeaderLengthOut: &headerLength)
+        guard probe == noErr, count > 0 else { return nil }
+        var units: [[UInt8]] = []
+        for index in 0..<count {
+            var pointer: UnsafePointer<UInt8>?
+            var size = 0
+            let status = codec == .h264
+                ? CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, parameterSetIndex: index, parameterSetPointerOut: &pointer,
+                                                                     parameterSetSizeOut: &size, parameterSetCountOut: nil,
+                                                                     nalUnitHeaderLengthOut: nil)
+                : CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format, parameterSetIndex: index, parameterSetPointerOut: &pointer,
+                                                                     parameterSetSizeOut: &size, parameterSetCountOut: nil,
+                                                                     nalUnitHeaderLengthOut: nil)
+            guard status == noErr, let pointer, size > 0 else { continue }
+            let unit = Array(UnsafeBufferPointer(start: pointer, count: size))
+            // Nur VPS/SPS/PPS bzw. SPS/PPS – z. B. SEI-Präfixe weglassen
+            if let type = NAL.type(unit, codec), NAL.isParameterSetOrDelimiter(type, codec) { units.append(unit) }
+        }
+        return (units, Int(headerLength))
+    }
+
+    /// Box-Inhalt (z. B. hvcC) aus den Sample-Description-Erweiterungen von VideoToolbox
+    private static func configurationAtom(_ format: CMFormatDescription, _ name: String) -> [UInt8] {
+        guard let atoms = CMFormatDescriptionGetExtension(format, extensionKey: kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms) as? NSDictionary,
+              let data = atoms[name] as? Data else { return [] }
+        return [UInt8](data)
     }
 
     // MARK: Audio
