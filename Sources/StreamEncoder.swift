@@ -52,19 +52,50 @@ struct AudioParameters: Equatable {
     }
 }
 
+/// Einstellungen, die beim Start eines Streams festgelegt werden.
+/// Die DASH-Segmentlänge ist ein Vielfaches von 16 Bildern (0,533 s): Genau dann enden Bild- und Ton-Segmente
+/// gleichzeitig, denn 16 Bilder bei 30 fps dauern so lang wie 25 AAC-Frames zu 1024 Samples bei 48 kHz.
+struct StreamSettings {
+    static let frameRate = 30
+    static let audioBitRate = 128_000
+    static let segmentChoices = [16, 32, 64]
+    static let defaultSegmentFrames = 32
+    /// Toleranz für Segment- und Keyframe-Grenzen (Rundung der Zeitstempel)
+    static let boundaryTolerance = 0.002
+
+    let segmentFrames: Int
+
+    init(segmentFrames: Int) {
+        self.segmentFrames = Self.segmentChoices.contains(segmentFrames) ? segmentFrames : Self.defaultSegmentFrames
+    }
+
+    var segmentDuration: Double { Double(segmentFrames) / Double(Self.frameRate) }
+
+    /// Keyframe-Abstand: teilt die Segmentlänge und ist höchstens gut 1 s, damit TS- und RTSP-Zuschauer schnell einsteigen
+    var keyframeInterval: Double { Double(min(segmentFrames, 32)) / Double(Self.frameRate) }
+
+    /// Kurze Segmente bedeuten viele Keyframes – dafür etwas mehr Datenrate
+    var videoBitRate: Int { segmentFrames <= 16 ? 8_000_000 : 6_000_000 }
+
+    /// Nummer des Segments, in das ein Zeitpunkt fällt
+    func segmentNumber(at time: Double) -> Int {
+        Int(floor((time + Self.boundaryTolerance) / segmentDuration))
+    }
+
+    static func label(frames: Int) -> String {
+        let seconds = Double(frames) / Double(frameRate)
+        return String(format: "%.3f s", seconds).replacingOccurrences(of: ".", with: ",")
+    }
+}
+
 /// Kodiert Bild (H.264, Hardware) und Ton (AAC-LC) für den Netzwerk-Stream.
 /// `encodeVideo`/`encodeAudio` laufen auf der Capture-Queue, die Ergebnisse kommen auf `outputQueue`.
 /// Alle Zeiten sind Medienzeit: Sekunden seit dem ersten Videobild.
 final class StreamEncoder {
-    static let videoBitRate = 6_000_000
-    static let audioBitRate = 128_000
-    static let frameRate = 30
-    /// Ein Keyframe pro Sekunde: schneller Einstieg für neue Zuschauer, DASH-Segmente beginnen darauf
-    static let keyframeInterval = 1.0
-
     var onVideo: ((EncodedVideoFrame, VideoParameters) -> Void)?
     var onAudio: ((EncodedAudioFrame, AudioParameters) -> Void)?
 
+    let settings: StreamSettings
     private let outputQueue: DispatchQueue
     private let clock: CMClock
     private let lock = NSLock()
@@ -87,9 +118,10 @@ final class StreamEncoder {
 
     private final class Flag { var value = false }
 
-    init(outputQueue: DispatchQueue, clock: CMClock) {
+    init(outputQueue: DispatchQueue, clock: CMClock, settings: StreamSettings) {
         self.outputQueue = outputQueue
         self.clock = clock
+        self.settings = settings
     }
 
     deinit { invalidate() }
@@ -140,9 +172,12 @@ final class StreamEncoder {
         lastVideoTime = time
 
         var properties: CFDictionary?
-        if time >= nextKeyframe {
+        // Keyframe am ersten Bild ab jeder Grenze – DASH schneidet die Segmente genau dort
+        let tolerance = StreamSettings.boundaryTolerance
+        if time + tolerance >= nextKeyframe {
             properties = [kVTEncodeFrameOptionKey_ForceKeyFrame as String: true] as CFDictionary
-            nextKeyframe = (floor(time / Self.keyframeInterval) + 1) * Self.keyframeInterval
+            let interval = settings.keyframeInterval
+            nextKeyframe = (floor((time + tolerance) / interval) + 1) * interval
         }
         let status = VTCompressionSessionEncodeFrame(session,
                                                      imageBuffer: pixelBuffer,
@@ -178,18 +213,20 @@ final class StreamEncoder {
         Self.set(created, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel)
         // Ohne B-Frames: Dekodier- und Anzeigereihenfolge sind gleich, PTS = DTS
         Self.set(created, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
-        Self.set(created, kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: Self.videoBitRate))
+        let bitRate = settings.videoBitRate
+        Self.set(created, kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: bitRate))
         Self.set(created, kVTCompressionPropertyKey_DataRateLimits,
-                 [NSNumber(value: Self.videoBitRate * 3 / 2 / 8), NSNumber(value: 1)] as CFArray)
-        Self.set(created, kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: Self.frameRate))
-        Self.set(created, kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: Self.frameRate * 4))
+                 [NSNumber(value: bitRate * 3 / 2 / 8), NSNumber(value: 1)] as CFArray)
+        Self.set(created, kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: StreamSettings.frameRate))
+        Self.set(created, kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: StreamSettings.frameRate * 4))
         Self.set(created, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 4))
         VTCompressionSessionPrepareToEncodeFrames(created)
         session = created
         sessionWidth = width
         sessionHeight = height
         nextKeyframe = 0
-        debugLog("Stream-Encoder: H.264 \(width)x\(height), \(Self.videoBitRate / 1_000_000) Mbit/s")
+        debugLog("Stream-Encoder: H.264 \(width)x\(height), \(bitRate / 1_000_000) Mbit/s, "
+                 + "Keyframe alle \(StreamSettings.label(frames: min(settings.segmentFrames, 32)))")
     }
 
     private static func set(_ session: VTCompressionSession, _ key: CFString, _ value: CFTypeRef) {
@@ -307,7 +344,7 @@ final class StreamEncoder {
             debugLog("AAC-Encoder startet nicht (\(rate) Hz)")
             return
         }
-        created.bitRate = Self.audioBitRate
+        created.bitRate = StreamSettings.audioBitRate
         converter = created
         pcmFormat = pcm
         audioParameters = AudioParameters(sampleRate: rate, channels: 2)

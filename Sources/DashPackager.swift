@@ -1,13 +1,14 @@
 import Foundation
 
-/// MPEG-DASH-Live-Stream: CMAF-Segmente (fMP4) von 2 s, je ein Adaptation Set für Bild und Ton,
-/// adressiert über `SegmentTemplate` mit `$Number$`. Segment n beginnt bei Medienzeit n · 2 s.
+/// MPEG-DASH-Live-Stream: CMAF-Segmente (fMP4) mit einstellbarer Länge D, je ein Adaptation Set für Bild
+/// und Ton, adressiert über `SegmentTemplate` mit `$Number$`. Segment n beginnt bei Medienzeit n · D.
 /// Läuft komplett auf der Stream-Queue.
 final class DashPackager {
     enum Track { case video, audio }
 
-    static let segmentDuration = 2.0
-    private let keepSegments = 20
+    let settings: StreamSettings
+    /// Wie viele Segmente vorgehalten werden (gut 40 s)
+    let keepSegments: Int
     private let videoTrackID = 1
     private let audioTrackID = 2
 
@@ -30,6 +31,11 @@ final class DashPackager {
     private var audioSamples: [MP4.Sample] = []
     private var audioNumber = 0
     private var audioStartTicks: Int64 = 0
+
+    init(settings: StreamSettings) {
+        self.settings = settings
+        keepSegments = Int((40 / settings.segmentDuration).rounded(.up))
+    }
 
     /// Manifest vollständig (Bild und Ton bekannt)
     var isComplete: Bool { videoInit != nil && audioInit != nil }
@@ -78,18 +84,20 @@ final class DashPackager {
         if let previous = pendingFrame {
             // Dauer eines Bildes = Abstand zum nächsten; nach Signalausfall Nennwert
             var duration = ticks - Self.ticks(previous.time, 90_000)
-            if duration <= 0 || duration > 45_000 { duration = Int64(90_000 / StreamEncoder.frameRate) }
+            if duration <= 0 || duration > 45_000 { duration = Int64(90_000 / StreamSettings.frameRate) }
             videoSamples.append(MP4.Sample(data: Self.lengthPrefixed(previous),
                                            duration: UInt32(duration),
                                            flags: previous.isKeyframe ? MP4.syncSampleFlags : MP4.nonSyncSampleFlags))
         }
         if frame.isKeyframe {
+            // Neues Segment am ersten Keyframe ab der Segmentgrenze (der Encoder setzt ihn genau dort)
+            let number = settings.segmentNumber(at: frame.time)
             if videoSamples.isEmpty {
-                videoNumber = Int(floor(frame.time / Self.segmentDuration))
+                videoNumber = number
                 videoStartTicks = ticks
-            } else if frame.time >= Double(videoNumber + 1) * Self.segmentDuration {
+            } else if number > videoNumber {
                 finishVideoSegment()
-                videoNumber = Int(floor(frame.time / Self.segmentDuration))
+                videoNumber = number
                 videoStartTicks = ticks
             }
         }
@@ -120,12 +128,12 @@ final class DashPackager {
         guard availabilityStart != nil else { return }   // Ton erst, wenn das Bild läuft
         if parameters != audioParameters {
             audioParameters = parameters
-            audioInit = MP4.audioInit(parameters, trackID: audioTrackID, bitRate: StreamEncoder.audioBitRate)
+            audioInit = MP4.audioInit(parameters, trackID: audioTrackID, bitRate: StreamSettings.audioBitRate)
             audioSegments.removeAll()
             latestAudio = -1
             audioSamples.removeAll()
         }
-        let number = Int(floor(frame.time / Self.segmentDuration))
+        let number = settings.segmentNumber(at: frame.time)
         if audioSamples.isEmpty == false && number > audioNumber {
             finishAudioSegment()
         }
@@ -147,31 +155,43 @@ final class DashPackager {
 
     // MARK: Manifest
 
+    private static func duration(_ seconds: Double) -> String {
+        String(format: "PT%.3fS", seconds)
+    }
+
     func manifest() -> String? {
         guard let start = availabilityStart, let video = videoParameters else { return nil }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let now = formatter.string(from: Date())
-        let seconds = Int(Self.segmentDuration)
+        let segment = settings.segmentDuration
+        let frames = settings.segmentFrames
+        // Abstand zur Live-Kante: drei Segmente; Player mit Latenzsteuerung (z. B. dash.js) halten sich daran
+        let delay = 3 * segment
 
         var lines: [String] = []
         lines.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
         lines.append("<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" profiles=\"urn:mpeg:dash:profile:isoff-live:2011\""
                      + " type=\"dynamic\" availabilityStartTime=\"\(formatter.string(from: start))\" publishTime=\"\(now)\""
-                     + " minimumUpdatePeriod=\"PT10S\" minBufferTime=\"PT\(seconds)S\" suggestedPresentationDelay=\"PT4S\""
-                     + " timeShiftBufferDepth=\"PT30S\" maxSegmentDuration=\"PT\(seconds)S\">")
+                     + " minimumUpdatePeriod=\"PT10S\" minBufferTime=\"\(Self.duration(segment))\""
+                     + " suggestedPresentationDelay=\"\(Self.duration(delay))\" timeShiftBufferDepth=\"PT30S\""
+                     + " maxSegmentDuration=\"\(Self.duration(segment + 0.1))\">")
+        lines.append("  <ServiceDescription id=\"0\">")
+        lines.append("    <Latency target=\"\(Int(delay * 1000))\" min=\"\(Int(2 * segment * 1000))\" max=\"\(Int(6 * segment * 1000))\"/>")
+        lines.append("    <PlaybackRate min=\"0.96\" max=\"1.04\"/>")
+        lines.append("  </ServiceDescription>")
         lines.append("  <Period id=\"0\" start=\"PT0S\">")
         lines.append("    <AdaptationSet id=\"0\" contentType=\"video\" mimeType=\"video/mp4\" segmentAlignment=\"true\" startWithSAP=\"1\">")
-        lines.append("      <SegmentTemplate timescale=\"90000\" duration=\"\(seconds * 90_000)\" startNumber=\"0\""
+        lines.append("      <SegmentTemplate timescale=\"90000\" duration=\"\(frames * 90_000 / StreamSettings.frameRate)\" startNumber=\"0\""
                      + " initialization=\"video_init.mp4\" media=\"video_$Number$.m4s\"/>")
-        lines.append("      <Representation id=\"video\" codecs=\"avc1.\(video.profileLevelID)\" bandwidth=\"\(StreamEncoder.videoBitRate)\""
-                     + " width=\"\(video.width)\" height=\"\(video.height)\" frameRate=\"\(StreamEncoder.frameRate)\" sar=\"1:1\"/>")
+        lines.append("      <Representation id=\"video\" codecs=\"avc1.\(video.profileLevelID)\" bandwidth=\"\(settings.videoBitRate)\""
+                     + " width=\"\(video.width)\" height=\"\(video.height)\" frameRate=\"\(StreamSettings.frameRate)\" sar=\"1:1\"/>")
         lines.append("    </AdaptationSet>")
         if let audio = audioParameters {
             lines.append("    <AdaptationSet id=\"1\" contentType=\"audio\" mimeType=\"audio/mp4\" lang=\"und\" segmentAlignment=\"true\" startWithSAP=\"1\">")
-            lines.append("      <SegmentTemplate timescale=\"\(audio.sampleRate)\" duration=\"\(seconds * audio.sampleRate)\" startNumber=\"0\""
+            lines.append("      <SegmentTemplate timescale=\"\(audio.sampleRate)\" duration=\"\(frames * audio.sampleRate / StreamSettings.frameRate)\" startNumber=\"0\""
                          + " initialization=\"audio_init.mp4\" media=\"audio_$Number$.m4s\"/>")
-            lines.append("      <Representation id=\"audio\" codecs=\"mp4a.40.2\" bandwidth=\"\(StreamEncoder.audioBitRate)\" audioSamplingRate=\"\(audio.sampleRate)\">")
+            lines.append("      <Representation id=\"audio\" codecs=\"mp4a.40.2\" bandwidth=\"\(StreamSettings.audioBitRate)\" audioSamplingRate=\"\(audio.sampleRate)\">")
             lines.append("        <AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"\(audio.channels)\"/>")
             lines.append("      </Representation>")
             lines.append("    </AdaptationSet>")

@@ -37,15 +37,15 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 | `Sources/Recorder.swift` | `AVAssetWriter` MP4: H.264 from the capture sample buffers, AAC from rebuilt stereo PCM buffers with gap-free timestamps |
 | `Sources/Views.swift` | `PreviewView` (`AVCaptureVideoPreviewLayer`, mouse/Esc handling), `ShutterView` (screenshot flash, click-through) and `LevelMeterView` |
 | `Sources/StreamService.swift` | Network stream: wires encoder → TS/DASH/RTSP, HTTP routes, waiting DASH requests, viewer count, local IP, status page |
-| `Sources/StreamEncoder.swift` | VideoToolbox H.264 (no B-frames, forced keyframe every 1 s) and AAC-LC via `AVAudioConverter`; media time = seconds since first video frame |
+| `Sources/StreamEncoder.swift` | `StreamSettings` (segment length, keyframe interval, bit rates) and the encoder: VideoToolbox H.264 (no B-frames, forced keyframes) and AAC-LC via `AVAudioConverter`; media time = seconds since first video frame |
 | `Sources/TSMuxer.swift` | MPEG-2 TS: PAT/PMT before each keyframe, PES with PTS, PCR on video, AAC as ADTS |
 | `Sources/MP4.swift` | fMP4/CMAF boxes: init segments (`avc1`/`avcC`, `mp4a`/`esds`) and media segments (`moof`+`mdat`) |
-| `Sources/DashPackager.swift` | DASH live: 2 s segments numbered by media time, separate video/audio adaptation sets, dynamic MPD |
+| `Sources/DashPackager.swift` | DASH live: segments numbered by media time, separate video/audio adaptation sets, dynamic MPD with latency target |
 | `Sources/RTSPServer.swift` | RTSP server, RTP packetizing (H.264 FU-A, AAC RFC 3640), RTCP sender reports |
 | `Sources/HTTPServer.swift` | Minimal HTTP/1.1 server on Network.framework (keep-alive, delayed responses, endless streams) |
 | `Sources/Bytes.swift` | Big-endian helpers, MPEG-2 CRC-32, header parsing shared by HTTP and RTSP |
 | `Sources/AccessList.swift` | `NetworkAccessList`: parses allowed networks (`192.168.x.x`, CIDR, single IPs, IPv6) and checks remote endpoints |
-| `Sources/SettingsWindow.swift` | Settings window (⌘,): editable access list, applied live |
+| `Sources/SettingsWindow.swift` | Settings window (⌘,): editable access list (applied live), DASH segment length (applied on next stream start) |
 | `Tools/MakeIcon.swift` | Draws the 1024 px app icon |
 | `Info.plist` | Bundle ID `local.hdmicapture`, camera/microphone/local-network usage strings |
 
@@ -70,10 +70,17 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 - Ports: HTTP 8080 (`/live.ts`, `/dash/live.mpd`, `/dash/*.m4s`, `/` status page), RTSP 8554 (`rtsp://<ip>:8554/live`).
 - One shared encoder feeds all three formats. Media time 0 is the first video frame; all PTS, RTP timestamps and
   DASH segment numbers derive from it. Capture timestamps use `session.synchronizationClock`.
-- Keyframes are forced at the first frame ≥ each whole second. DASH segment n covers media time [2n, 2n+2) and
-  is cut at the first keyframe ≥ 2(n+1); `availabilityStartTime` = wall clock at media time 0.
-- DASH requests for segments up to three ahead of the newest are held (up to 8 s) instead of answering 404,
-  which absorbs clock differences between Mac and player.
+- DASH segment length D = 16, 32 or 64 frames (0.533 / 1.067 / 2.133 s; UserDefaults `dashSegmentFrames`,
+  default 32). Multiples of 16 frames = 25 AAC frames, so audio and video segments line up. Keyframes are
+  forced at the first frame ≥ each multiple of min(D, 32 frames); segment n covers media time [nD, (n+1)D) and
+  is cut at the first keyframe in segment n+1. Boundaries use a 2 ms tolerance (`StreamSettings.boundaryTolerance`)
+  in both encoder and packager. 0.533 s uses 8 Mbit/s, otherwise 6 Mbit/s.
+- MPD: `minBufferTime` = D, `suggestedPresentationDelay` and `ServiceDescription/Latency@target` = 3D,
+  `availabilityStartTime` = wall clock at media time 0.
+- DASH requests for segments up to max(3, 6 s / D) ahead of the newest are held (up to 8 s) instead of
+  answering 404, which absorbs clock differences between Mac and player.
+- ffmpeg's DASH demuxer is a poor live client (re-requests the same segment many times, more with short
+  segments, even against ffmpeg's own DASH output) – don't read too much into its warnings.
 - RTSP: only TCP interleaved; UDP SETUP gets `461 Unsupported Transport` (VLC/ffmpeg then retry with TCP).
   Sender reports go out with the first packet of each track and every second — without them live555/VLC
   can't sync audio and video.

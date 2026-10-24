@@ -1,28 +1,30 @@
 import AppKit
 
-/// Einstellungen: aus welchen Netzen der Stream abgerufen werden darf.
-/// Änderungen gelten sofort, auch für einen laufenden Stream.
+/// Einstellungen für den Stream: freigegebene Netze (gilt sofort) und DASH-Segmentlänge (gilt beim nächsten Start).
 final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
     /// Neuer Text der Zugriffsliste
     var onChange: ((String) -> Void)?
+    /// Neue DASH-Segmentlänge in Bildern
+    var onSegmentChange: ((Int) -> Void)?
 
     private var textView: NSTextView!
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
+    private let segmentPopup = NSPopUpButton(frame: .zero, pullsDown: false)
 
-    init(text: String) {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 380),
+    init(text: String, segmentFrames: Int) {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 500),
                               styleMask: [.titled, .closable],
                               backing: .buffered, defer: false)
         window.title = "Einstellungen"
         window.isReleasedWhenClosed = false
         super.init(window: window)
-        buildContent(text: text)
+        buildContent(text: text, segmentFrames: segmentFrames)
         window.center()
     }
 
     required init?(coder: NSCoder) { fatalError("nicht unterstützt") }
 
-    private func buildContent(text: String) {
+    private func buildContent(text: String, segmentFrames: Int) {
         guard let content = window?.contentView else { return }
 
         let title = NSTextField(labelWithString: "Stream: Zugriff erlauben aus")
@@ -53,7 +55,31 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
         let resetButton = NSButton(title: "Standard wiederherstellen", target: self, action: #selector(resetToDefault))
         resetButton.bezelStyle = .rounded
 
-        let stack = NSStackView(views: [title, explanation, scrollView, statusLabel, resetButton])
+        // DASH-Segmentlänge
+        let separator = NSBox()
+        separator.boxType = .separator
+        let dashTitle = NSTextField(labelWithString: "MPEG-DASH: Segmentlänge")
+        dashTitle.font = .boldSystemFont(ofSize: 13)
+        for frames in StreamSettings.segmentChoices {
+            var itemTitle = StreamSettings.label(frames: frames)
+            if frames == 16 { itemTitle += " – geringste Verzögerung, 8 Mbit/s" }
+            if frames == StreamSettings.defaultSegmentFrames { itemTitle += " (Standard)" }
+            if frames == 64 { itemTitle += " – robuster bei schwachem WLAN" }
+            segmentPopup.addItem(withTitle: itemTitle)
+            segmentPopup.lastItem?.tag = frames
+        }
+        segmentPopup.selectItem(withTag: StreamSettings(segmentFrames: segmentFrames).segmentFrames)
+        segmentPopup.target = self
+        segmentPopup.action = #selector(segmentChanged)
+        let dashExplanation = NSTextField(wrappingLabelWithString:
+            "Kürzere Segmente verringern die Verzögerung bei Playern, die einige Segmente Abstand zur Live-Kante halten "
+            + "(z. B. dash.js). Die Längen sind so gewählt, dass Bild- und Ton-Segmente exakt gleich lang sind. "
+            + "Die Änderung gilt beim nächsten Start des Streams.")
+        dashExplanation.font = .systemFont(ofSize: 11)
+        dashExplanation.textColor = .secondaryLabelColor
+
+        let stack = NSStackView(views: [title, explanation, scrollView, statusLabel, resetButton,
+                                        separator, dashTitle, segmentPopup, dashExplanation])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
@@ -67,6 +93,8 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
             stack.topAnchor.constraint(equalTo: content.topAnchor),
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             explanation.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
+            dashExplanation.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
+            separator.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
             statusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
             scrollView.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
             scrollView.heightAnchor.constraint(equalToConstant: 150),
@@ -77,6 +105,10 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
         onChange?(textView.string)
         updateStatus()
+    }
+
+    @objc private func segmentChanged() {
+        onSegmentChange?(segmentPopup.selectedTag())
     }
 
     @objc private func resetToDefault() {

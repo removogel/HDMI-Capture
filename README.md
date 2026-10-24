@@ -16,7 +16,7 @@ Click **Stream** in the control bar (or press ⌘K). The addresses appear in the
 | Format | Address | Notes |
 |---|---|---|
 | MPEG-TS over HTTP | `http://<mac-ip>:8080/live.ts` | Shortest delay (about 1–2 s in VLC) |
-| MPEG-DASH | `http://<mac-ip>:8080/dash/live.mpd` | 2 s segments; players add a larger buffer |
+| MPEG-DASH | `http://<mac-ip>:8080/dash/live.mpd` | Segment length selectable in Settings (0.533 / 1.067 / 2.133 s) |
 | RTSP | `rtsp://<mac-ip>:8554/live` | RTP over TCP (interleaved); UDP is refused, VLC and ffmpeg switch automatically |
 
 In VLC (iPad, iPhone, Mac): **Network → Open Network Stream** and enter one of the addresses.
@@ -24,6 +24,15 @@ In VLC (iPad, iPhone, Mac): **Network → Open Network Stream** and enter one of
 The stream uses H.264 (about 6 Mbit/s for 1080p30) and AAC stereo. The status shows `LIVE` and the number of viewers.
 
 macOS may ask whether HDMI Capture may accept incoming network connections or access the local network; allow it.
+
+### DASH segment length
+
+Settings (⌘,) offers three segment lengths: **0.533 s**, **1.067 s** (default) and **2.133 s**. They are
+multiples of 16 frames, because 16 frames at 30 fps last exactly as long as 25 AAC frames at 48 kHz, so video
+and audio segments end together. Shorter segments reduce the delay in players that keep a few segments
+behind the live edge (e.g. dash.js); the MPD also announces a latency target of three segments. With
+0.533 s the stream uses 8 Mbit/s instead of 6 Mbit/s because of the more frequent keyframes. Keyframes come
+every segment, at most every 1.067 s. A new length takes effect the next time streaming starts.
 
 ### Who can watch
 

@@ -45,7 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         defaults.register(defaults: ["volume": 1.0, "swapChannels": false, "alwaysOnTop": false,
-                                     "streamAllowedNetworks": NetworkAccessList.defaultText])
+                                     "streamAllowedNetworks": NetworkAccessList.defaultText,
+                                     "dashSegmentFrames": StreamSettings.defaultSegmentFrames])
         buildMenu()
         buildWindow()
 
@@ -418,7 +419,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard streamStarting == false else { return }
         streamStarting = true
         streamButton.isEnabled = false
-        engine.startStreaming(accessList: accessList) { [weak self] result in
+        let settings = StreamSettings(segmentFrames: defaults.integer(forKey: "dashSegmentFrames"))
+        engine.startStreaming(accessList: accessList, settings: settings) { [weak self] result in
             guard let self else { return }
             self.streamStarting = false
             self.streamButton.isEnabled = true
@@ -427,7 +429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.isStreaming = true
                 self.streamAddresses = addresses
                 self.viewers = 0
-                self.flash("Stream läuft – Adressen oben links")
+                self.flash("Stream läuft – DASH-Segmente \(StreamSettings.label(frames: settings.segmentFrames))")
             case .failure(let error):
                 self.flash("Stream nicht gestartet: \(error.localizedDescription)", seconds: 10)
             }
@@ -478,12 +480,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc func showSettings(_ sender: Any?) {
         if settingsController == nil {
-            let controller = SettingsWindowController(text: defaults.string(forKey: "streamAllowedNetworks") ?? NetworkAccessList.defaultText)
+            let controller = SettingsWindowController(text: defaults.string(forKey: "streamAllowedNetworks") ?? NetworkAccessList.defaultText,
+                                                      segmentFrames: defaults.integer(forKey: "dashSegmentFrames"))
             controller.onChange = { [weak self] text in
                 guard let self else { return }
                 self.defaults.set(text, forKey: "streamAllowedNetworks")
                 self.engine.updateStreamAccess(self.accessList)
                 self.updateAccessField()
+            }
+            controller.onSegmentChange = { [weak self] frames in
+                guard let self else { return }
+                self.defaults.set(frames, forKey: "dashSegmentFrames")
+                if self.isStreaming {
+                    self.flash("Neue Segmentlänge gilt ab dem nächsten Start des Streams")
+                }
             }
             settingsController = controller
         }

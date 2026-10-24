@@ -90,14 +90,14 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     // MARK: Stream im Netzwerk
 
-    func startStreaming(accessList: NetworkAccessList,
+    func startStreaming(accessList: NetworkAccessList, settings: StreamSettings,
                         completion: @escaping @MainActor (Result<StreamAddresses, Error>) -> Void) {
         queue.async { [weak self] in
             guard let self else { return }
             self.stream?.stop()
             // Zeitstempel der Capture-Daten beziehen sich auf diese Uhr
             let clock = self.session.synchronizationClock ?? CMClockGetHostTimeClock()
-            let service = StreamService(clock: clock, accessList: accessList)
+            let service = StreamService(clock: clock, accessList: accessList, settings: settings)
             service.onViewers = { [weak self] count in
                 guard let callback = self?.onViewers else { return }
                 Self.onMain { callback(count) }

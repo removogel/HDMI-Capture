@@ -41,7 +41,7 @@ final class StreamService {
     private let queue: DispatchQueue
     private var accessList: NetworkAccessList
     private let tsMuxer = TSMuxer()
-    private let dash = DashPackager()
+    private let dash: DashPackager
     private var http: HTTPServer?
     private var rtsp: RTSPServer?
     private var tsClients: [ObjectIdentifier: TSClient] = [:]
@@ -67,11 +67,12 @@ final class StreamService {
         init(connection: HTTPConnection) { self.connection = connection }
     }
 
-    init(clock: CMClock, accessList: NetworkAccessList) {
+    init(clock: CMClock, accessList: NetworkAccessList, settings: StreamSettings) {
         let queue = DispatchQueue(label: "local.hdmicapture.stream", qos: .userInitiated)
         self.queue = queue
         self.accessList = accessList
-        encoder = StreamEncoder(outputQueue: queue, clock: clock)
+        dash = DashPackager(settings: settings)
+        encoder = StreamEncoder(outputQueue: queue, clock: clock, settings: settings)
         encoder.onVideo = { [weak self] frame, parameters in self?.handleVideo(frame, parameters) }
         encoder.onAudio = { [weak self] frame, parameters in self?.handleAudio(frame, parameters) }
     }
@@ -266,8 +267,9 @@ final class StreamService {
             }
             let latest = dash.latest(segment.track)
             let available = dash.segment(segment.track, segment.number) != nil
-            // Zu alt → 404; bis zu drei Segmente in der Zukunft → warten, bis es fertig ist
-            if available == false && (segment.number <= latest || segment.number > latest + 3) {
+            // Zu alt → 404; bis zu gut 6 s in der Zukunft (Uhren von Mac und Player weichen ab) → warten
+            let maxAhead = max(3, Int((6 / dash.settings.segmentDuration).rounded(.up)))
+            if available == false && (segment.number <= latest || segment.number > latest + maxAhead) {
                 connection.respond(status: 404)
                 return
             }
