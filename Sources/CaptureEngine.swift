@@ -30,6 +30,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     var onLevels: (@MainActor (Float, Float) -> Void)?
     var onStats: (@MainActor (Double, Int, Int) -> Void)?
+    var onViewers: (@MainActor (Int) -> Void)?
 
     private let queue = DispatchQueue(label: "local.hdmicapture.capture", qos: .userInteractive)
     private let videoOutput = AVCaptureVideoDataOutput()
@@ -57,6 +58,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private var audioInfo = "kein Ton"
     private var recorder: Recorder?
     private var snapshotRequests: [SnapshotRequest] = []
+    private var stream: StreamService?
 
     // MARK: Start / Stopp
 
@@ -83,6 +85,40 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     func setSwap(_ on: Bool) {
         queue.async { self.swapLR = on }
+    }
+
+    // MARK: Stream im Netzwerk
+
+    func startStreaming(completion: @escaping @MainActor (Result<StreamAddresses, Error>) -> Void) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.stream?.stop()
+            // Zeitstempel der Capture-Daten beziehen sich auf diese Uhr
+            let clock = self.session.synchronizationClock ?? CMClockGetHostTimeClock()
+            let service = StreamService(clock: clock)
+            service.onViewers = { [weak self] count in
+                guard let callback = self?.onViewers else { return }
+                Self.onMain { callback(count) }
+            }
+            self.stream = service
+            service.start { [weak self] result in
+                if case .failure = result {
+                    self?.queue.async {
+                        guard let self, self.stream === service else { return }
+                        service.stop()
+                        self.stream = nil
+                    }
+                }
+                Self.onMain { completion(result) }
+            }
+        }
+    }
+
+    func stopStreaming() {
+        queue.async { [weak self] in
+            self?.stream?.stop()
+            self?.stream = nil
+        }
     }
 
     private func configure(audioAllowed: Bool) -> String? {
@@ -259,6 +295,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
             videoW = CVPixelBufferGetWidth(pixelBuffer)
             videoH = CVPixelBufferGetHeight(pixelBuffer)
+            stream?.encoder.encodeVideo(pixelBuffer, hostTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
             if snapshotRequests.isEmpty == false {
                 let requests = snapshotRequests
                 snapshotRequests.removeAll()
@@ -334,6 +371,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         if monitor.isRunning == false { monitor.start(sampleRate: rate) }
         monitor.push(samples)
         recorder?.appendAudio(samples, rate: rate, pts: pts)
+        stream?.encoder.encodeAudio(samples, sampleRate: rate, hostTime: pts)
     }
 
     // Alle 50 ms: Pegel an die Oberfläche, jede Sekunde Bildrate, alle 10 s Diagnose.

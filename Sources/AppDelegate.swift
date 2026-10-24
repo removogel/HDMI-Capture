@@ -18,11 +18,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let fullscreenButton = NSButton(title: "", target: nil, action: nil)
     private let snapshotButton = NSButton(title: "", target: nil, action: nil)
     private let shutter = ShutterView(frame: .zero)
+    private let streamButton = NSButton(title: "Stream", target: nil, action: nil)
+    private let streamPanel = NSVisualEffectView()
+    private let tsField = NSTextField(labelWithString: "")
+    private let dashField = NSTextField(labelWithString: "")
+    private let rtspField = NSTextField(labelWithString: "")
 
     private var hideTimer: Timer?
     private var recTimer: Timer?
     private var recStart: Date?
     private var isRecording = false
+    private var isStreaming = false
+    private var streamStarting = false
+    private var viewers = 0
+    private var streamAddresses: StreamAddresses?
     private var modeText = "Warte auf Bild …"
     private var flashText: String?
     private var flashID = 0
@@ -38,6 +47,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         engine.onLevels = { [weak self] l, r in self?.updateLevels(l, r) }
         engine.onStats = { [weak self] fps, w, h in self?.updateStats(fps: fps, width: w, height: h) }
+        engine.onViewers = { [weak self] count in
+            guard let self, self.isStreaming else { return }
+            self.viewers = count
+            self.updateStatus()
+        }
         engine.setSwap(defaults.bool(forKey: "swapChannels"))
         engine.monitor.volume = defaults.float(forKey: "volume")
         engine.start { [weak self] message in
@@ -63,6 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        engine.stopStreaming()
         engine.stop()
         if let activity { ProcessInfo.processInfo.endActivity(activity) }
     }
@@ -79,7 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.backgroundColor = .black
         window.isReleasedWhenClosed = false
         window.contentAspectRatio = NSSize(width: 16, height: 9)
-        window.minSize = NSSize(width: 800, height: 450)
+        window.minSize = NSSize(width: 960, height: 540)
         window.collectionBehavior = [.fullScreenPrimary]
         window.delegate = self
         window.center()
@@ -103,6 +118,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         snapshotButton.image = NSImage(systemSymbolName: "camera", accessibilityDescription: "Bildschirmfoto")
         snapshotButton.imagePosition = .imageOnly
         snapshotButton.toolTip = "Bildschirmfoto sichern (⌘S)"
+        streamButton.target = self
+        streamButton.action = #selector(toggleStreaming(_:))
+        streamButton.image = NSImage(systemSymbolName: "dot.radiowaves.left.and.right", accessibilityDescription: "Stream")
+        streamButton.imagePosition = .imageLeading
+        streamButton.toolTip = "Stream im lokalen Netzwerk ein-/ausschalten (⌘K)"
         swapBox.target = self
         swapBox.action = #selector(toggleSwap(_:))
         swapBox.state = defaults.bool(forKey: "swapChannels") ? .on : .off
@@ -122,7 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         speaker.contentTintColor = .secondaryLabelColor
         meter.toolTip = "Pegel links / rechts"
 
-        let stack = NSStackView(views: [recordButton, snapshotButton, Self.divider(), swapBox, speaker, volumeSlider, meter,
+        let stack = NSStackView(views: [recordButton, snapshotButton, Self.divider(), streamButton, Self.divider(), swapBox, speaker, volumeSlider, meter,
                                         Self.divider(), pinBox, fullscreenButton])
         stack.orientation = .horizontal
         stack.alignment = .centerY
@@ -136,13 +156,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         Self.style(statusPill, radius: 8)
         statusPill.addSubview(statusLabel)
 
-        for view in [preview, shutter, controls, statusPill, stack, statusLabel, meter, volumeSlider] as [NSView] {
+        // Adressen des Streams (oben links, nur während des Streams sichtbar)
+        let panelTitle = NSTextField(labelWithString: "Stream im lokalen Netzwerk")
+        panelTitle.font = .systemFont(ofSize: 12, weight: .semibold)
+        panelTitle.textColor = .white
+        var rows: [[NSView]] = []
+        for (name, field) in [("MPEG-TS", tsField), ("MPEG-DASH", dashField), ("RTSP", rtspField)] {
+            let label = NSTextField(labelWithString: name)
+            label.font = .systemFont(ofSize: 11, weight: .medium)
+            label.textColor = .secondaryLabelColor
+            field.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            field.textColor = .white
+            field.isSelectable = true
+            rows.append([label, field])
+        }
+        let grid = NSGridView(views: rows)
+        grid.rowSpacing = 4
+        grid.columnSpacing = 10
+        let panelHint = NSTextField(labelWithString: "In VLC: Netzwerk → Netzwerk-Stream öffnen")
+        panelHint.font = .systemFont(ofSize: 11)
+        panelHint.textColor = .secondaryLabelColor
+        let panelStack = NSStackView(views: [panelTitle, grid, panelHint])
+        panelStack.orientation = .vertical
+        panelStack.alignment = .leading
+        panelStack.spacing = 6
+        panelStack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
+        Self.style(streamPanel, radius: 10)
+        streamPanel.addSubview(panelStack)
+        streamPanel.isHidden = true
+
+        for view in [preview, shutter, controls, statusPill, stack, statusLabel, meter, volumeSlider,
+                     streamPanel, panelStack] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
         }
         content.addSubview(preview)
         content.addSubview(shutter)
         content.addSubview(controls)
         content.addSubview(statusPill)
+        content.addSubview(streamPanel)
+
+        NSLayoutConstraint.activate([
+            panelStack.leadingAnchor.constraint(equalTo: streamPanel.leadingAnchor),
+            panelStack.trailingAnchor.constraint(equalTo: streamPanel.trailingAnchor),
+            panelStack.topAnchor.constraint(equalTo: streamPanel.topAnchor),
+            panelStack.bottomAnchor.constraint(equalTo: streamPanel.bottomAnchor),
+            streamPanel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            streamPanel.topAnchor.constraint(equalTo: content.safeAreaLayoutGuide.topAnchor, constant: 8),
+        ])
 
         NSLayoutConstraint.activate([
             preview.leadingAnchor.constraint(equalTo: content.leadingAnchor),
@@ -211,21 +271,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             context.duration = 0.15
             controls.animator().alphaValue = 1
             statusPill.animator().alphaValue = 1
+            streamPanel.animator().alphaValue = 1
         }
         hideTimer = Timer.scheduledTimer(timeInterval: 3, target: self, selector: #selector(hideControlsIfIdle),
                                          userInfo: nil, repeats: false)
     }
 
     @objc private func hideControlsIfIdle() {
-        let mouse = controls.convert(window.mouseLocationOutsideOfEventStream, from: nil)
-        if controls.bounds.contains(mouse) {
+        let location = window.mouseLocationOutsideOfEventStream
+        let overPanel = streamPanel.isHidden == false && streamPanel.bounds.contains(streamPanel.convert(location, from: nil))
+        if controls.bounds.contains(controls.convert(location, from: nil)) || overPanel {
             showControls()
             return
         }
-        let keepStatus = isRecording || flashText != nil
+        let keepStatus = isRecording || isStreaming || flashText != nil
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.4
             controls.animator().alphaValue = 0
+            streamPanel.animator().alphaValue = 0
             if keepStatus == false { statusPill.animator().alphaValue = 0 }
         }
         if window.styleMask.contains(.fullScreen) { NSCursor.setHiddenUntilMouseMoves(true) }
@@ -240,6 +303,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let t = Int(Date().timeIntervalSince(start))
             text.append(NSAttributedString(string: String(format: "● REC %02d:%02d:%02d   ", t / 3600, (t / 60) % 60, t % 60),
                                            attributes: [.foregroundColor: NSColor.systemRed, .font: font]))
+        }
+        if isStreaming {
+            let audience = viewers == 0 ? "" : " · \(viewers) Zuschauer"
+            text.append(NSAttributedString(string: "● LIVE\(audience)   ",
+                                           attributes: [.foregroundColor: NSColor.systemGreen, .font: font]))
         }
         text.append(NSAttributedString(string: flashText ?? modeText,
                                        attributes: [.foregroundColor: NSColor.white, .font: font]))
@@ -326,6 +394,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc func showRecordings(_ sender: Any?) {
         if let folder = try? Self.recordingsFolder() { NSWorkspace.shared.open(folder) }
+    }
+
+    // MARK: - Stream
+
+    @objc func toggleStreaming(_ sender: Any?) {
+        if isStreaming {
+            engine.stopStreaming()
+            isStreaming = false
+            streamAddresses = nil
+            viewers = 0
+            updateStreamUI()
+            flash("Stream beendet")
+            return
+        }
+        guard streamStarting == false else { return }
+        streamStarting = true
+        streamButton.isEnabled = false
+        engine.startStreaming { [weak self] result in
+            guard let self else { return }
+            self.streamStarting = false
+            self.streamButton.isEnabled = true
+            switch result {
+            case .success(let addresses):
+                self.isStreaming = true
+                self.streamAddresses = addresses
+                self.viewers = 0
+                self.flash("Stream läuft – Adressen oben links")
+            case .failure(let error):
+                self.flash("Stream nicht gestartet: \(error.localizedDescription)", seconds: 10)
+            }
+            self.updateStreamUI()
+        }
+    }
+
+    @objc func copyStreamAddresses(_ sender: Any?) {
+        guard let addresses = streamAddresses else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(addresses.summary, forType: .string)
+        flash("Stream-Adressen kopiert")
+    }
+
+    private func updateStreamUI() {
+        streamButton.title = isStreaming ? "Stream beenden" : "Stream"
+        streamButton.contentTintColor = isStreaming ? .systemGreen : nil
+        if let addresses = streamAddresses {
+            tsField.stringValue = addresses.ts
+            dashField.stringValue = addresses.dash
+            rtspField.stringValue = addresses.rtsp
+        }
+        streamPanel.isHidden = isStreaming == false
+        updateStatus()
+        showControls()
     }
 
     @objc func showSnapshots(_ sender: Any?) {
@@ -457,6 +577,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             m.addItem(withTitle: "Aufnahmeordner zeigen", action: #selector(showRecordings(_:)), keyEquivalent: "").target = self
             m.addItem(withTitle: "Bildschirmfotos zeigen", action: #selector(showSnapshots(_:)), keyEquivalent: "").target = self
         }
+        _ = submenu("Stream") { m in
+            let toggle = m.addItem(withTitle: "Stream starten", action: #selector(toggleStreaming(_:)), keyEquivalent: "k")
+            toggle.target = self
+            toggle.tag = 4
+            let copy = m.addItem(withTitle: "Stream-Adressen kopieren", action: #selector(copyStreamAddresses(_:)), keyEquivalent: "")
+            copy.target = self
+            copy.tag = 5
+        }
         _ = submenu("Ton") { m in
             let swap = m.addItem(withTitle: "Links/Rechts tauschen", action: #selector(toggleSwap(_:)), keyEquivalent: "l")
             swap.target = self
@@ -487,6 +615,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         case 1: menuItem.title = isRecording ? "Aufnahme beenden" : "Aufnahme starten"
         case 2: menuItem.state = defaults.bool(forKey: "swapChannels") ? .on : .off
         case 3: menuItem.state = defaults.bool(forKey: "alwaysOnTop") ? .on : .off
+        case 4:
+            menuItem.title = isStreaming ? "Stream beenden" : "Stream starten"
+            return streamStarting == false
+        case 5: return isStreaming
         default: break
         }
         return true

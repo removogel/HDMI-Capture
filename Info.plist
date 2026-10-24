@@ -32,5 +32,7 @@
 	<string>HDMI Capture zeigt das Bild deiner HDMI-Capture-Karte an.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>HDMI Capture gibt den Ton deiner HDMI-Capture-Karte wieder.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>HDMI Capture stellt den Stream für Geräte im lokalen Netzwerk bereit.</string>
 </dict>
 </plist>

@@ -18,8 +18,8 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 
 ## CI and releases
 
-- `.github/workflows/build.yml` runs `build.sh` on `macos-latest` for every push to `main` and every pull request,
-  so a green run means the code compiles. Compiler errors are turned into annotations on the check run.
+- `.github/workflows/build.yml` runs `build.sh` on `macos-latest` for every push (any branch) and every pull
+  request, so a green run means the code compiles. Compiler errors are turned into annotations on the check run.
 - Releases: publish a GitHub release with a tag `vX.Y.Z` (web UI, or
   `gh release create vX.Y.Z --target main --notes-file .github/release-notes.md`). The `release: published` event
   builds with `VERSION=X.Y.Z`, zips the app with `ditto` and attaches `HDMI-Capture-X.Y.Z.zip` to the release.
@@ -36,8 +36,16 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 | `Sources/AudioMonitor.swift` | Live audio playback: `AVAudioEngine` + `AVAudioSourceNode` reading a lock-protected ring buffer (target 50 ms, trimmed back above 250 ms) |
 | `Sources/Recorder.swift` | `AVAssetWriter` MP4: H.264 from the capture sample buffers, AAC from rebuilt stereo PCM buffers with gap-free timestamps |
 | `Sources/Views.swift` | `PreviewView` (`AVCaptureVideoPreviewLayer`, mouse/Esc handling), `ShutterView` (screenshot flash, click-through) and `LevelMeterView` |
+| `Sources/StreamService.swift` | Network stream: wires encoder → TS/DASH/RTSP, HTTP routes, waiting DASH requests, viewer count, local IP, status page |
+| `Sources/StreamEncoder.swift` | VideoToolbox H.264 (no B-frames, forced keyframe every 1 s) and AAC-LC via `AVAudioConverter`; media time = seconds since first video frame |
+| `Sources/TSMuxer.swift` | MPEG-2 TS: PAT/PMT before each keyframe, PES with PTS, PCR on video, AAC as ADTS |
+| `Sources/MP4.swift` | fMP4/CMAF boxes: init segments (`avc1`/`avcC`, `mp4a`/`esds`) and media segments (`moof`+`mdat`) |
+| `Sources/DashPackager.swift` | DASH live: 2 s segments numbered by media time, separate video/audio adaptation sets, dynamic MPD |
+| `Sources/RTSPServer.swift` | RTSP server, RTP packetizing (H.264 FU-A, AAC RFC 3640), RTCP sender reports |
+| `Sources/HTTPServer.swift` | Minimal HTTP/1.1 server on Network.framework (keep-alive, delayed responses, endless streams) |
+| `Sources/Bytes.swift` | Big-endian helpers, MPEG-2 CRC-32, header parsing shared by HTTP and RTSP |
 | `Tools/MakeIcon.swift` | Draws the 1024 px app icon |
-| `Info.plist` | Bundle ID `local.hdmicapture`, camera/microphone usage strings |
+| `Info.plist` | Bundle ID `local.hdmicapture`, camera/microphone/local-network usage strings |
 
 ## Hardware quirks (the reason for most of the code)
 
@@ -55,6 +63,24 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
   like dropouts or heavy distortion. QuickTime and `AVCaptureAudioDataOutput` receive the full stream.
 - Device names: video `USB Video`, audio `USB Digital Audio`. Other devices are only a fallback.
 
+## Streaming
+
+- Ports: HTTP 8080 (`/live.ts`, `/dash/live.mpd`, `/dash/*.m4s`, `/` status page), RTSP 8554 (`rtsp://<ip>:8554/live`).
+- One shared encoder feeds all three formats. Media time 0 is the first video frame; all PTS, RTP timestamps and
+  DASH segment numbers derive from it. Capture timestamps use `session.synchronizationClock`.
+- Keyframes are forced at the first frame ≥ each whole second. DASH segment n covers media time [2n, 2n+2) and
+  is cut at the first keyframe ≥ 2(n+1); `availabilityStartTime` = wall clock at media time 0.
+- DASH requests for segments up to three ahead of the newest are held (up to 8 s) instead of answering 404,
+  which absorbs clock differences between Mac and player.
+- RTSP: only TCP interleaved; UDP SETUP gets `461 Unsupported Transport` (VLC/ffmpeg then retry with TCP).
+  Sender reports go out with the first packet of each track and every second — without them live555/VLC
+  can't sync audio and video.
+- New TS/RTSP viewers start at the next keyframe. A client with more than 4 MB unsent data is paused until the
+  next keyframe (frames are dropped, memory stays bounded).
+- The AAC encoder adds 2112 samples of priming; audio timestamps are shifted back by that amount.
+- Muxer output was checked with ffprobe/ffmpeg via a Python mirror of the logic (TS decode, fMP4 segments, live
+  DASH, RTSP with UDP→TCP fallback). Playback in VLC on iPad is not verified here.
+
 ## Threading
 
 - Capture callbacks, all `Recorder` access and the stats timer run on the serial `CaptureEngine.queue`.
@@ -64,6 +90,8 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
   (no signal) complete with `nil`.
 - `AudioMonitor.push` runs on the capture queue and `render` on the audio thread; they share the ring buffer
   under an `os_unfair_lock`.
+- Streaming: `StreamEncoder.encodeVideo/encodeAudio` and `StreamService.stop()` run on the capture queue;
+  encoder output, muxers, HTTP/RTSP servers and all network callbacks run on the serial stream queue.
 - Compiled with `-swift-version 5` (minimal concurrency checking). Keep new code free of data races anyway.
 
 ## Conventions
