@@ -99,6 +99,9 @@ final class RTSPServer {
 
     var mediaTimeNow: () -> Double? = { nil }
     var onSessionsChanged: (() -> Void)?
+    /// Darf diese Gegenstelle zugreifen? Abgelehnte Verbindungen werden sofort geschlossen.
+    var isAllowed: (NWEndpoint) -> Bool = { _ in true }
+    var onRejected: ((NWEndpoint) -> Void)?
 
     private let listener: NWListener
     private let queue: DispatchQueue
@@ -159,7 +162,19 @@ final class RTSPServer {
         callback(error)
     }
 
+    /// Schließt bestehende Sitzungen, die nach einer Änderung der Zugriffsliste nicht mehr erlaubt sind
+    func closeDisallowed() {
+        for session in Array(sessions.values) where isAllowed(session.endpoint) == false {
+            session.close()
+        }
+    }
+
     private func accept(_ connection: NWConnection) {
+        guard isAllowed(connection.endpoint) else {
+            connection.cancel()
+            onRejected?(connection.endpoint)
+            return
+        }
         let session = RTSPSession(connection: connection, queue: queue, server: self)
         let id = ObjectIdentifier(session)
         sessions[id] = session
@@ -248,6 +263,7 @@ final class RTSPSession {
     var onClose: (() -> Void)?
     var onStateChange: (() -> Void)?
     private(set) var isPlaying = false
+    var endpoint: NWEndpoint { connection.endpoint }
 
     private let connection: NWConnection
     private let queue: DispatchQueue

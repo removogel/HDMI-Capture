@@ -31,7 +31,7 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 | File | Responsibility |
 |---|---|
 | `Sources/main.swift` | NSApplication bootstrap |
-| `Sources/AppDelegate.swift` | Window, auto-hiding HUD controls, menus and shortcuts, settings in `UserDefaults` (`volume`, `swapChannels`, `alwaysOnTop`), file names for recordings and screenshots, clipboard |
+| `Sources/AppDelegate.swift` | Window, auto-hiding HUD controls, menus and shortcuts, settings in `UserDefaults` (`volume`, `swapChannels`, `alwaysOnTop`, `streamAllowedNetworks`), file names for recordings and screenshots, clipboard |
 | `Sources/CaptureEngine.swift` | `AVCaptureSession`: picks the video device and mode and the audio device, handles sample buffers, fixes the MS2109 audio, grabs still frames (`snapshot`), drives level and fps updates |
 | `Sources/AudioMonitor.swift` | Live audio playback: `AVAudioEngine` + `AVAudioSourceNode` reading a lock-protected ring buffer (target 50 ms, trimmed back above 250 ms) |
 | `Sources/Recorder.swift` | `AVAssetWriter` MP4: H.264 from the capture sample buffers, AAC from rebuilt stereo PCM buffers with gap-free timestamps |
@@ -44,6 +44,8 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 | `Sources/RTSPServer.swift` | RTSP server, RTP packetizing (H.264 FU-A, AAC RFC 3640), RTCP sender reports |
 | `Sources/HTTPServer.swift` | Minimal HTTP/1.1 server on Network.framework (keep-alive, delayed responses, endless streams) |
 | `Sources/Bytes.swift` | Big-endian helpers, MPEG-2 CRC-32, header parsing shared by HTTP and RTSP |
+| `Sources/AccessList.swift` | `NetworkAccessList`: parses allowed networks (`192.168.x.x`, CIDR, single IPs, IPv6) and checks remote endpoints |
+| `Sources/SettingsWindow.swift` | Settings window (⌘,): editable access list, applied live |
 | `Tools/MakeIcon.swift` | Draws the 1024 px app icon |
 | `Info.plist` | Bundle ID `local.hdmicapture`, camera/microphone/local-network usage strings |
 
@@ -75,6 +77,11 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 - RTSP: only TCP interleaved; UDP SETUP gets `461 Unsupported Transport` (VLC/ffmpeg then retry with TCP).
   Sender reports go out with the first packet of each track and every second — without them live555/VLC
   can't sync audio and video.
+- Access control: HTTP and RTSP listeners only run while streaming is on. Every incoming connection is checked
+  against `NetworkAccessList` (UserDefaults key `streamAllowedNetworks`, default `192.168.x.x` / `10.x.x.x`);
+  others are cancelled before any data is read. Loopback is always allowed, IPv4-mapped IPv6 is treated as
+  IPv4. Changing the list closes connections that are no longer allowed. No authentication or encryption.
+- The app has an Edit menu so text fields work; ⌘C (`copy:`) without a text field copies the current frame.
 - New TS/RTSP viewers start at the next keyframe. A client with more than 4 MB unsent data is paused until the
   next keyframe (frames are dropped, memory stays bounded).
 - The AAC encoder adds 2112 samples of priming; audio timestamps are shifted back by that amount.

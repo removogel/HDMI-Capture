@@ -12,6 +12,9 @@ struct HTTPRequest {
 /// Läuft komplett auf `queue`.
 final class HTTPServer {
     var onRequest: ((HTTPRequest, HTTPConnection) -> Void)?
+    /// Darf diese Gegenstelle zugreifen? Abgelehnte Verbindungen werden sofort geschlossen.
+    var isAllowed: (NWEndpoint) -> Bool = { _ in true }
+    var onRejected: ((NWEndpoint) -> Void)?
 
     private let listener: NWListener
     private let queue: DispatchQueue
@@ -59,7 +62,19 @@ final class HTTPServer {
         callback(error)
     }
 
+    /// Schließt bestehende Verbindungen, die nach einer Änderung der Zugriffsliste nicht mehr erlaubt sind
+    func closeDisallowed() {
+        for connection in Array(connections.values) where isAllowed(connection.endpoint) == false {
+            connection.close()
+        }
+    }
+
     private func accept(_ nwConnection: NWConnection) {
+        guard isAllowed(nwConnection.endpoint) else {
+            nwConnection.cancel()
+            onRejected?(nwConnection.endpoint)
+            return
+        }
         let connection = HTTPConnection(connection: nwConnection, queue: queue)
         let id = ObjectIdentifier(connection)
         connections[id] = connection
@@ -75,6 +90,7 @@ final class HTTPServer {
 /// Eine HTTP-Verbindung. Anfragen werden nacheinander beantwortet; eine Antwort darf auf sich warten lassen
 /// (z. B. bis das nächste DASH-Segment fertig ist). Mit `startStream` wird daraus ein endloser Datenstrom.
 final class HTTPConnection {
+    let endpoint: NWEndpoint
     let remoteHost: String
     var onRequest: ((HTTPRequest) -> Void)?
     private(set) var isClosed = false
@@ -92,6 +108,7 @@ final class HTTPConnection {
     init(connection: NWConnection, queue: DispatchQueue) {
         self.connection = connection
         self.queue = queue
+        endpoint = connection.endpoint
         if case let .hostPort(host, _) = connection.endpoint {
             remoteHost = "\(host)"
         } else {

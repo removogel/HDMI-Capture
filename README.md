@@ -25,6 +25,34 @@ The stream uses H.264 (about 6 Mbit/s for 1080p30) and AAC stereo. The status sh
 
 macOS may ask whether HDMI Capture may accept incoming network connections or access the local network; allow it.
 
+### Who can watch
+
+The stream servers only run while streaming is switched on; nothing listens when the app is closed or
+streaming is off. Connections are only accepted from the networks listed under **Settings (⌘,)**, by default
+`192.168.x.x` and `10.x.x.x`. The Mac itself always has access. One entry per line, for example:
+
+```
+192.168.x.x          # all of 192.168.0.0/16
+192.168.178.0/24     # only the home network of a FRITZ!Box
+192.168.178.30       # a single device
+fd00::/8             # local IPv6 addresses
+```
+
+Changes apply immediately; viewers from networks that are no longer allowed are disconnected. A rejected
+connection shows a notice in the app. The stream itself is not encrypted and has no password.
+
+### Troubleshooting
+
+If the stream plays on the Mac but not on other devices:
+
+- Open `http://<mac-ip>:8080/` in Safari on the other device. If the page loads but VLC can't play, allow VLC
+  under **Settings → Privacy & Security → Local Network** on the iPad/iPhone.
+- Check that the device is in an allowed network and not in a guest Wi-Fi (on a FRITZ!Box the guest network
+  is 192.168.179.x and can't reach the home network).
+- If the macOS firewall is on, HDMI Capture needs "Allow incoming connections" under
+  **System Settings → Network → Firewall → Options**. Because the app is ad-hoc signed, this may be needed
+  again after each rebuild.
+
 ## Download
 
 Get the latest version from [Releases](https://github.com/removogel/HDMI-Capture/releases/latest).
@@ -64,6 +92,7 @@ buffer level to the terminal every 10 seconds:
 | ⌘S | Save screenshot |
 | ⌘C | Copy current frame to the clipboard |
 | ⌘K | Start / stop streaming |
+| ⌘, | Settings (allowed networks for the stream) |
 | ⌘L | Swap left/right channels |
 | ⌘↑ / ⌘↓ | Volume up / down |
 | ⌃⌘F, double-click | Full screen |

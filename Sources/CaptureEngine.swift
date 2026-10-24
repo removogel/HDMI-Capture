@@ -31,6 +31,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     var onLevels: (@MainActor (Float, Float) -> Void)?
     var onStats: (@MainActor (Double, Int, Int) -> Void)?
     var onViewers: (@MainActor (Int) -> Void)?
+    var onStreamRejected: (@MainActor (String) -> Void)?
 
     private let queue = DispatchQueue(label: "local.hdmicapture.capture", qos: .userInteractive)
     private let videoOutput = AVCaptureVideoDataOutput()
@@ -89,16 +90,21 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     // MARK: Stream im Netzwerk
 
-    func startStreaming(completion: @escaping @MainActor (Result<StreamAddresses, Error>) -> Void) {
+    func startStreaming(accessList: NetworkAccessList,
+                        completion: @escaping @MainActor (Result<StreamAddresses, Error>) -> Void) {
         queue.async { [weak self] in
             guard let self else { return }
             self.stream?.stop()
             // Zeitstempel der Capture-Daten beziehen sich auf diese Uhr
             let clock = self.session.synchronizationClock ?? CMClockGetHostTimeClock()
-            let service = StreamService(clock: clock)
+            let service = StreamService(clock: clock, accessList: accessList)
             service.onViewers = { [weak self] count in
                 guard let callback = self?.onViewers else { return }
                 Self.onMain { callback(count) }
+            }
+            service.onRejected = { [weak self] host in
+                guard let callback = self?.onStreamRejected else { return }
+                Self.onMain { callback(host) }
             }
             self.stream = service
             service.start { [weak self] result in
@@ -111,6 +117,12 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                 }
                 Self.onMain { completion(result) }
             }
+        }
+    }
+
+    func updateStreamAccess(_ accessList: NetworkAccessList) {
+        queue.async { [weak self] in
+            self?.stream?.setAccessList(accessList)
         }
     }
 

@@ -23,6 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let tsField = NSTextField(labelWithString: "")
     private let dashField = NSTextField(labelWithString: "")
     private let rtspField = NSTextField(labelWithString: "")
+    private let accessField = NSTextField(labelWithString: "")
+    private var settingsController: SettingsWindowController?
+    private var lastRejectionNotice: [String: Date] = [:]
 
     private var hideTimer: Timer?
     private var recTimer: Timer?
@@ -41,7 +44,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: - App-Lebenszyklus
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        defaults.register(defaults: ["volume": 1.0, "swapChannels": false, "alwaysOnTop": false])
+        defaults.register(defaults: ["volume": 1.0, "swapChannels": false, "alwaysOnTop": false,
+                                     "streamAllowedNetworks": NetworkAccessList.defaultText])
         buildMenu()
         buildWindow()
 
@@ -52,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.viewers = count
             self.updateStatus()
         }
+        engine.onStreamRejected = { [weak self] host in self?.noteRejection(host) }
         engine.setSwap(defaults.bool(forKey: "swapChannels"))
         engine.monitor.volume = defaults.float(forKey: "volume")
         engine.start { [weak self] message in
@@ -176,7 +181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let panelHint = NSTextField(labelWithString: "In VLC: Netzwerk → Netzwerk-Stream öffnen")
         panelHint.font = .systemFont(ofSize: 11)
         panelHint.textColor = .secondaryLabelColor
-        let panelStack = NSStackView(views: [panelTitle, grid, panelHint])
+        accessField.font = .systemFont(ofSize: 11)
+        accessField.textColor = .secondaryLabelColor
+        let panelStack = NSStackView(views: [panelTitle, grid, panelHint, accessField])
         panelStack.orientation = .vertical
         panelStack.alignment = .leading
         panelStack.spacing = 6
@@ -411,7 +418,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard streamStarting == false else { return }
         streamStarting = true
         streamButton.isEnabled = false
-        engine.startStreaming { [weak self] result in
+        engine.startStreaming(accessList: accessList) { [weak self] result in
             guard let self else { return }
             self.streamStarting = false
             self.streamButton.isEnabled = true
@@ -443,9 +450,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             dashField.stringValue = addresses.dash
             rtspField.stringValue = addresses.rtsp
         }
+        updateAccessField()
         streamPanel.isHidden = isStreaming == false
         updateStatus()
         showControls()
+    }
+
+    // MARK: - Zugriffsliste
+
+    private var accessList: NetworkAccessList {
+        NetworkAccessList(text: defaults.string(forKey: "streamAllowedNetworks") ?? NetworkAccessList.defaultText)
+    }
+
+    private func updateAccessField() {
+        let list = accessList
+        if let host = streamAddresses?.host, list.allows(address: host) == false {
+            accessField.stringValue = "Achtung: Dein Netz (\(host)) ist nicht freigegeben – Einstellungen ⌘,"
+            accessField.textColor = .systemOrange
+        } else if list.subnets.isEmpty {
+            accessField.stringValue = "Kein Netz freigegeben – nur dieser Mac · Einstellungen ⌘,"
+            accessField.textColor = .systemOrange
+        } else {
+            accessField.stringValue = "Zugriff nur aus: \(list.summary) · Einstellungen ⌘,"
+            accessField.textColor = .secondaryLabelColor
+        }
+    }
+
+    @objc func showSettings(_ sender: Any?) {
+        if settingsController == nil {
+            let controller = SettingsWindowController(text: defaults.string(forKey: "streamAllowedNetworks") ?? NetworkAccessList.defaultText)
+            controller.onChange = { [weak self] text in
+                guard let self else { return }
+                self.defaults.set(text, forKey: "streamAllowedNetworks")
+                self.engine.updateStreamAccess(self.accessList)
+                self.updateAccessField()
+            }
+            settingsController = controller
+        }
+        // Bei „Immer im Vordergrund“ sonst hinter dem Hauptfenster
+        settingsController?.window?.level = window.level
+        settingsController?.showWindow(nil)
+        settingsController?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Hinweis auf abgewiesene Verbindungen – pro Adresse höchstens alle 10 s
+    private func noteRejection(_ host: String) {
+        let now = Date()
+        if let last = lastRejectionNotice[host], now.timeIntervalSince(last) < 10 { return }
+        lastRejectionNotice[host] = now
+        flash("Zugriff von \(host) abgelehnt – Netz unter Einstellungen freigeben", seconds: 8)
     }
 
     @objc func showSnapshots(_ sender: Any?) {
@@ -468,6 +521,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.flash("Bildschirmfoto nicht gespeichert: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// „Bearbeiten → Kopieren“ (⌘C), wenn kein Textfeld aktiv ist: aktuelles Bild kopieren
+    @objc func copy(_ sender: Any?) {
+        copySnapshot(sender)
     }
 
     @objc func copySnapshot(_ sender: Any?) {
@@ -559,6 +617,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         _ = submenu("HDMI Capture") { m in
             m.addItem(withTitle: "Über HDMI Capture", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
             m.addItem(.separator())
+            m.addItem(withTitle: "Einstellungen …", action: #selector(showSettings(_:)), keyEquivalent: ",").target = self
+            m.addItem(.separator())
             m.addItem(withTitle: "HDMI Capture ausblenden", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
             let others = m.addItem(withTitle: "Andere ausblenden", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
             others.keyEquivalentModifierMask = [.command, .option]
@@ -572,10 +632,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             record.tag = 1
             m.addItem(.separator())
             m.addItem(withTitle: "Bildschirmfoto sichern", action: #selector(takeSnapshot(_:)), keyEquivalent: "s").target = self
-            m.addItem(withTitle: "Bild kopieren", action: #selector(copySnapshot(_:)), keyEquivalent: "c").target = self
+            m.addItem(withTitle: "Bild kopieren", action: #selector(copySnapshot(_:)), keyEquivalent: "").target = self
             m.addItem(.separator())
             m.addItem(withTitle: "Aufnahmeordner zeigen", action: #selector(showRecordings(_:)), keyEquivalent: "").target = self
             m.addItem(withTitle: "Bildschirmfotos zeigen", action: #selector(showSnapshots(_:)), keyEquivalent: "").target = self
+        }
+        // Bearbeiten: nötig für Textfelder (Einstellungen). ⌘C ohne Textauswahl kopiert das aktuelle Bild.
+        _ = submenu("Bearbeiten") { m in
+            m.addItem(withTitle: "Widerrufen", action: Selector(("undo:")), keyEquivalent: "z")
+            let redo = m.addItem(withTitle: "Wiederholen", action: Selector(("redo:")), keyEquivalent: "z")
+            redo.keyEquivalentModifierMask = [.command, .shift]
+            m.addItem(.separator())
+            m.addItem(withTitle: "Ausschneiden", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+            m.addItem(withTitle: "Kopieren", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+            m.addItem(withTitle: "Einsetzen", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+            m.addItem(withTitle: "Alles auswählen", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         }
         _ = submenu("Stream") { m in
             let toggle = m.addItem(withTitle: "Stream starten", action: #selector(toggleStreaming(_:)), keyEquivalent: "k")

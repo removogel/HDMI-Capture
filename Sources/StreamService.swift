@@ -1,8 +1,11 @@
 import CoreMedia
 import Darwin
 import Foundation
+import Network
 
 struct StreamAddresses {
+    /// IP-Adresse des Macs im lokalen Netz
+    let host: String
     let ts: String
     let dash: String
     let rtsp: String
@@ -32,8 +35,11 @@ final class StreamService {
     let encoder: StreamEncoder
     /// Zuschauerzahl hat sich geändert (Aufruf auf der Stream-Queue)
     var onViewers: ((Int) -> Void)?
+    /// Verbindung von dieser Adresse abgewiesen (Aufruf auf der Stream-Queue)
+    var onRejected: ((String) -> Void)?
 
     private let queue: DispatchQueue
+    private var accessList: NetworkAccessList
     private let tsMuxer = TSMuxer()
     private let dash = DashPackager()
     private var http: HTTPServer?
@@ -61,9 +67,10 @@ final class StreamService {
         init(connection: HTTPConnection) { self.connection = connection }
     }
 
-    init(clock: CMClock) {
+    init(clock: CMClock, accessList: NetworkAccessList) {
         let queue = DispatchQueue(label: "local.hdmicapture.stream", qos: .userInitiated)
         self.queue = queue
+        self.accessList = accessList
         encoder = StreamEncoder(outputQueue: queue, clock: clock)
         encoder.onVideo = { [weak self] frame, parameters in self?.handleVideo(frame, parameters) }
         encoder.onAudio = { [weak self] frame, parameters in self?.handleAudio(frame, parameters) }
@@ -81,6 +88,10 @@ final class StreamService {
                 http.onRequest = { [weak self] request, connection in self?.route(request, connection) }
                 rtsp.mediaTimeNow = { [weak self] in self?.encoder.mediaTimeNow() }
                 rtsp.onSessionsChanged = { [weak self] in self?.updateViewers() }
+                http.isAllowed = { [weak self] endpoint in self?.accessList.allows(endpoint) ?? false }
+                rtsp.isAllowed = { [weak self] endpoint in self?.accessList.allows(endpoint) ?? false }
+                http.onRejected = { [weak self] endpoint in self?.rejected(endpoint) }
+                rtsp.onRejected = { [weak self] endpoint in self?.rejected(endpoint) }
                 self.http = http
                 self.rtsp = rtsp
                 pendingStarts = 2
@@ -116,6 +127,24 @@ final class StreamService {
             dashViewers.removeAll()
             onViewers?(0)
         }
+    }
+
+    /// Neue Zugriffsliste übernehmen; Verbindungen von nicht mehr erlaubten Adressen werden getrennt
+    func setAccessList(_ list: NetworkAccessList) {
+        queue.async { [self] in
+            accessList = list
+            http?.closeDisallowed()
+            rtsp?.closeDisallowed()
+            dashViewers = dashViewers.filter { list.allows(address: $0.key) }
+            updateViewers()
+        }
+    }
+
+    private func rejected(_ endpoint: NWEndpoint) {
+        var host = "unbekannt"
+        if case let .hostPort(address, _) = endpoint { host = "\(address)" }
+        debugLog("Zugriff von \(host) abgelehnt (nicht in der Zugriffsliste)")
+        onRejected?(host)
     }
 
     private func serverReady(_ error: Error?) {
@@ -302,7 +331,8 @@ final class StreamService {
     // MARK: Adressen
 
     static func addresses(host: String) -> StreamAddresses {
-        StreamAddresses(ts: "http://\(host):\(httpPort)/live.ts",
+        StreamAddresses(host: host,
+                        ts: "http://\(host):\(httpPort)/live.ts",
                         dash: "http://\(host):\(httpPort)/dash/live.mpd",
                         rtsp: "rtsp://\(host):\(rtspPort)/live")
     }
