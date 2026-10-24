@@ -1,6 +1,6 @@
 import Foundation
 
-/// Bausteine für fragmentiertes MP4 (CMAF): Init-Segmente und Media-Segmente (moof + mdat)
+/// Bausteine für fragmentiertes MP4 (CMAF): Init-Segmente (H.264, HEVC, AAC) und Media-Segmente (moof + mdat)
 enum MP4 {
     struct Sample {
         let data: [UInt8]
@@ -36,7 +36,8 @@ enum MP4 {
 
     static func videoInit(_ parameters: VideoParameters, trackID: Int) -> [UInt8] {
         initSegment(trackID: trackID, timescale: 90_000, isAudio: false,
-                    width: parameters.width, height: parameters.height, sampleEntry: avc1(parameters))
+                    width: parameters.width, height: parameters.height,
+                    sampleEntry: parameters.codec == .h264 ? avc1(parameters) : hvc1(parameters))
     }
 
     static func audioInit(_ parameters: AudioParameters, trackID: Int, bitRate: Int) -> [UInt8] {
@@ -123,7 +124,8 @@ enum MP4 {
         return box("ftyp", ftyp) + box("moov", fullBox("mvhd", mvhd) + trak + mvex)
     }
 
-    private static func avc1(_ parameters: VideoParameters) -> [UInt8] {
+    /// VisualSampleEntry-Kopf (ISO/IEC 14496-12) ohne Konfigurations-Box
+    private static func visualSampleEntryHead(_ parameters: VideoParameters) -> [UInt8] {
         var entry = [UInt8](repeating: 0, count: 6)
         entry.appendU16(1)                // data_reference_index
         entry += [UInt8](repeating: 0, count: 16)
@@ -136,7 +138,11 @@ enum MP4 {
         entry += [UInt8](repeating: 0, count: 32)
         entry.appendU16(0x0018)           // depth
         entry.appendU16(0xFFFF)
+        return entry
+    }
 
+    private static func avc1(_ parameters: VideoParameters) -> [UInt8] {
+        var entry = visualSampleEntryHead(parameters)
         let sps = parameters.sps
         let pps = parameters.pps
         let profile: [UInt8] = sps.count >= 4 ? Array(sps[1...3]) : [0x64, 0x00, 0x28]
@@ -153,6 +159,13 @@ enum MP4 {
         }
         entry += box("avcC", avcC)
         return box("avc1", entry)
+    }
+
+    /// HEVC mit Parametersätzen nur in der hvcC (nicht im Bild) – „hvc1“, wie Apple es für HLS verlangt
+    private static func hvc1(_ parameters: VideoParameters) -> [UInt8] {
+        var entry = visualSampleEntryHead(parameters)
+        entry += box("hvcC", parameters.hvcC)
+        return box("hvc1", entry)
     }
 
     private static func mp4a(_ parameters: AudioParameters, bitRate: Int) -> [UInt8] {

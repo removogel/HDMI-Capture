@@ -10,10 +10,36 @@ func debugLog(_ text: String) {
     FileHandle.standardError.write(("HDMI Capture: " + text + "\n").data(using: .utf8) ?? Data())
 }
 
-struct VideoMode {
-    let device: AVCaptureDevice
-    let format: AVCaptureDevice.Format?
-    let range: AVFrameRateRange?
+/// Auswahl von Bild- und Tonquelle und gewünschte Bildrate
+struct CaptureOptions {
+    /// uniqueID des Videogeräts; nil = automatisch (bevorzugt den MS2109-Stick)
+    var videoDeviceID: String?
+    /// uniqueID des Audiogeräts; nil = automatisch (passend zum Videogerät), `noAudio` = ohne Ton
+    var audioDeviceID: String?
+    var frameRate: Int
+
+    static let noAudio = "none"
+}
+
+/// Was nach dem (Neu-)Einrichten tatsächlich läuft
+struct CaptureSetup {
+    var videoID: String?
+    var videoName: String?
+    var audioID: String?
+    var audioName: String?
+    /// Eingestellte Bildrate der Quelle; nil ohne Videogerät
+    var frameRate: Double?
+    /// Hinweise für die Statuszeile (fehlender Zugriff, Gerät nicht gefunden …)
+    var notes: [String] = []
+}
+
+/// Gewähltes Format eines Videogeräts
+struct FormatChoice {
+    let format: AVCaptureDevice.Format
+    let duration: CMTime
+    let fps: Double
+    let width: Int
+    let height: Int
 }
 
 /// Ein Standbild aus dem Videostrom in voller Auflösung, als Bild und fertig kodiertes PNG.
@@ -22,8 +48,8 @@ struct Snapshot {
     let png: Data
 }
 
-/// Holt Bild und Ton von der Capture-Karte, wählt den flüssigen MJPEG-Modus (420v)
-/// und deutet den Ton richtig: Der MS2109 meldet 96 kHz mono, liefert aber 48 kHz stereo.
+/// Holt Bild und Ton vom gewählten Capture-Gerät. Beim MS2109 wählt es den flüssigen MJPEG-Modus (420v)
+/// und deutet den Ton richtig: Der Chip meldet 96 kHz mono, liefert aber 48 kHz stereo.
 final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
     let session = AVCaptureSession()
     let monitor = AudioMonitor()
@@ -32,11 +58,15 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     var onStats: (@MainActor (Double, Int, Int) -> Void)?
     var onViewers: (@MainActor (Int) -> Void)?
     var onStreamRejected: (@MainActor (String) -> Void)?
+    /// Aufnahme wegen eines Schreibfehlers abgebrochen (z. B. Platte voll): Datei und Grund
+    var onRecordingFailed: (@MainActor (URL, String) -> Void)?
 
+    /// Sample-Buffer, Aufnahme, Stream-Encoder, Pegel
     private let queue = DispatchQueue(label: "local.hdmicapture.capture", qos: .userInteractive)
+    /// Konfiguration der Session und der Geräte
+    private let sessionQueue = DispatchQueue(label: "local.hdmicapture.session", qos: .userInitiated)
     private let videoOutput = AVCaptureVideoDataOutput()
     private let audioOutput = AVCaptureAudioDataOutput()
-    private var mode: VideoMode?
     private var timer: DispatchSourceTimer?
     private let snapshotQueue = DispatchQueue(label: "local.hdmicapture.snapshot", qos: .userInitiated)
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
@@ -46,9 +76,19 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         let done: @MainActor (Snapshot?) -> Void
     }
 
+    // Nur auf `sessionQueue` benutzt
+    private var videoInput: AVCaptureDeviceInput?
+    private var audioInput: AVCaptureDeviceInput?
+    private var options = CaptureOptions(frameRate: StreamSettings.defaultFrameRate)
+    private var audioAllowed = false
+    private var outputsAdded = false
+
     // Nur auf `queue` benutzt
     private var swapLR = false
+    /// MS2109: Die „Mono“-Samples sind abwechselnd links/rechts (96 kHz mono = 48 kHz stereo)
+    private var audioIsMS2109 = false
     private var pending: Float?
+    private var monitorRate: Double?
     private var frameCount = 0
     private var lastStats = ProcessInfo.processInfo.systemUptime
     private var lastDebug = ProcessInfo.processInfo.systemUptime
@@ -63,29 +103,272 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     // MARK: Start / Stopp
 
-    func start(completion: @escaping @MainActor (String?) -> Void) {
+    func start(options: CaptureOptions, completion: @escaping @MainActor (CaptureSetup) -> Void) {
         AVCaptureDevice.requestAccess(for: .video) { videoOK in
             AVCaptureDevice.requestAccess(for: .audio) { audioOK in
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        if videoOK == false {
-                            completion("No camera access – allow it in System Settings › Privacy & Security › Camera")
-                            return
-                        }
-                        completion(self.configure(audioAllowed: audioOK))
+                self.sessionQueue.async {
+                    guard videoOK else {
+                        var setup = CaptureSetup()
+                        setup.notes.append("No camera access – allow it in System Settings › Privacy & Security › Camera")
+                        Self.onMain { completion(setup) }
+                        return
                     }
+                    self.audioAllowed = audioOK
+                    let setup = self.apply(options)
+                    self.startTimer()
+                    Self.onMain { completion(setup) }
                 }
             }
         }
     }
 
+    /// Andere Geräte oder Bildrate übernehmen (z. B. nach Auswahl im Menü)
+    func reconfigure(options: CaptureOptions, completion: @escaping @MainActor (CaptureSetup) -> Void) {
+        sessionQueue.async {
+            let setup = self.apply(options)
+            Self.onMain { completion(setup) }
+        }
+    }
+
+    /// Nur die Bildrate ändern – ohne die Geräte neu einzurichten, eine laufende Aufnahme geht weiter.
+    /// Liefert die eingestellte Bildrate und ggf. einen Hinweis, wenn das Gerät die gewünschte nicht schafft.
+    func setFrameRate(_ fps: Int, completion: @escaping @MainActor (Double?, String?) -> Void) {
+        sessionQueue.async {
+            self.options.frameRate = fps
+            let choice = self.applyVideoFormat()
+            var note: String?
+            if let choice, choice.fps < Double(fps) - 0.5, let device = self.videoInput?.device {
+                note = "“\(device.localizedName)” delivers at most \(Int(choice.fps.rounded())) fps at \(choice.width)×\(choice.height)"
+            }
+            let applied = choice?.fps
+            let hint = note
+            Self.onMain { completion(applied, hint) }
+        }
+    }
+
     func stop() {
-        session.stopRunning()
+        sessionQueue.sync {
+            session.stopRunning()
+        }
         monitor.stop()
     }
 
     func setSwap(_ on: Bool) {
         queue.async { self.swapLR = on }
+    }
+
+    private func startTimer() {
+        guard timer == nil else { return }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 0.05, repeating: 0.05)
+        t.setEventHandler { [weak self] in self?.tick() }
+        t.resume()
+        timer = t
+    }
+
+    // MARK: Geräte
+
+    /// Alle Videogeräte: externe (Capture-Sticks, Kameras) und die eingebaute Kamera
+    static func videoDevices() -> [AVCaptureDevice] {
+        AVCaptureDevice.DiscoverySession(deviceTypes: [.external, .builtInWideAngleCamera], mediaType: .video,
+                                         position: .unspecified).devices
+    }
+
+    static func audioDevices() -> [AVCaptureDevice] {
+        AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio,
+                                         position: .unspecified).devices
+    }
+
+    /// MacroSilicon MS2109 (USB 534d:2109): Video heißt „USB Video“, Ton „USB Digital Audio“
+    static func isMS2109Video(_ device: AVCaptureDevice) -> Bool {
+        device.localizedName == "USB Video"
+            || device.uniqueID.lowercased().hasSuffix("534d2109")
+            || device.modelID.contains("VendorID_21325")
+    }
+
+    static func isMS2109Audio(_ device: AVCaptureDevice) -> Bool {
+        let ids = (device.uniqueID + " " + device.modelID).lowercased()
+        return device.localizedName.localizedCaseInsensitiveContains("USB Digital Audio")
+            || ids.contains("macrosilicon") || ids.contains("534d")
+    }
+
+    /// Automatisch: der MS2109-Stick, sonst das erste externe Gerät (nie die eingebaute Kamera)
+    static func automaticVideoDevice(in devices: [AVCaptureDevice]) -> AVCaptureDevice? {
+        let external = devices.filter { $0.deviceType == .external }
+        return external.first(where: isMS2109Video) ?? external.first
+    }
+
+    /// Automatisch passender Ton: gleicher USB-Anschluss oder gleicher Name wie das Videogerät,
+    /// sonst (beim MS2109 oder ohne Videogerät) „USB Digital Audio“. Ein Mikrofon wird nie geraten.
+    static func automaticAudioDevice(for video: AVCaptureDevice?, in devices: [AVCaptureDevice]) -> AVCaptureDevice? {
+        if let video {
+            if let location = usbLocation(of: video),
+               let match = devices.first(where: { $0.uniqueID.lowercased().contains(location) }) {
+                return match
+            }
+            if let match = devices.first(where: { $0.localizedName == video.localizedName }) { return match }
+            if isMS2109Video(video) == false { return nil }
+        }
+        return devices.first(where: isMS2109Audio)
+    }
+
+    /// UVC-Geräte haben die uniqueID „0x<Location-ID><Vendor><Product>“, z. B. 0x1140000534d2109 → „1140000“
+    private static func usbLocation(of device: AVCaptureDevice) -> String? {
+        let id = device.uniqueID.lowercased()
+        guard id.hasPrefix("0x"), id.count > 14 else { return nil }
+        let location = String(id.dropFirst(2).dropLast(8))
+        guard location.count >= 5, location.allSatisfy(\.isHexDigit) else { return nil }
+        return location
+    }
+
+    /// Bestes Format: Auflösung bis 1080p zuerst, dann die gewünschte Bildrate, bei Gleichstand 420v
+    /// (beim MS2109 der MJPEG-Modus; der unkomprimierte Modus schafft bei 1080p nur 5 fps).
+    static func chooseFormat(_ device: AVCaptureDevice, frameRate: Int) -> FormatChoice? {
+        let wanted = Double(frameRate)
+        let nv12 = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        var best: (choice: FormatChoice, key: (Int, Int, Int))?
+        for format in device.formats {
+            let dim = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let area = Int(dim.width) * Int(dim.height)
+            let fitsHD = dim.width <= 1920 && dim.height <= 1080
+            let isNV12 = CMFormatDescriptionGetMediaSubType(format.formatDescription) == nv12
+            for range in format.videoSupportedFrameRateRanges {
+                let fps = min(range.maxFrameRate, wanted)
+                guard fps > 0, fps >= range.minFrameRate - 0.01 else { continue }
+                // Nur Werte innerhalb des Bereichs – ein ungültiger löst eine Exception aus
+                let duration: CMTime
+                if abs(range.maxFrameRate - fps) < 0.01 {
+                    duration = range.minFrameDuration
+                } else if abs(range.minFrameRate - fps) < 0.01 {
+                    duration = range.maxFrameDuration
+                } else {
+                    duration = CMTime(value: 1, timescale: CMTimeScale(fps.rounded()))
+                }
+                let key = (fitsHD ? area : -area, Int((fps * 100).rounded()), isNV12 ? 1 : 0)
+                if let current = best, current.key >= key { continue }
+                best = (FormatChoice(format: format, duration: duration, fps: fps,
+                                     width: Int(dim.width), height: Int(dim.height)), key)
+            }
+        }
+        return best?.choice
+    }
+
+    /// Richtet die Session neu ein (auf `sessionQueue`)
+    private func apply(_ newOptions: CaptureOptions) -> CaptureSetup {
+        options = newOptions
+        var setup = CaptureSetup()
+
+        let videoDevices = Self.videoDevices()
+        var videoDevice: AVCaptureDevice?
+        if let id = newOptions.videoDeviceID {
+            videoDevice = videoDevices.first { $0.uniqueID == id }
+            if videoDevice == nil { setup.notes.append("Selected video device not connected – using automatic") }
+        }
+        if videoDevice == nil { videoDevice = Self.automaticVideoDevice(in: videoDevices) }
+
+        session.beginConfiguration()
+        if let input = videoInput { session.removeInput(input) }
+        if let input = audioInput { session.removeInput(input) }
+        videoInput = nil
+        audioInput = nil
+        if outputsAdded == false {
+            videoOutput.alwaysDiscardsLateVideoFrames = true
+            videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
+            videoOutput.setSampleBufferDelegate(self, queue: queue)
+            if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
+            audioOutput.setSampleBufferDelegate(self, queue: queue)
+            if session.canAddOutput(audioOutput) { session.addOutput(audioOutput) }
+            outputsAdded = true
+        }
+
+        if let device = videoDevice {
+            do {
+                let input = try AVCaptureDeviceInput(device: device)
+                if session.canAddInput(input) {
+                    session.addInput(input)
+                    videoInput = input
+                } else {
+                    setup.notes.append("Video: “\(device.localizedName)” can't be used")
+                }
+            } catch {
+                setup.notes.append("Video: \(error.localizedDescription)")
+            }
+        } else {
+            setup.notes.append("No capture device found")
+        }
+
+        if audioAllowed == false {
+            setup.notes.append("No microphone access – audio off")
+        } else if newOptions.audioDeviceID != CaptureOptions.noAudio {
+            let audioDevices = Self.audioDevices()
+            var audioDevice: AVCaptureDevice?
+            if let id = newOptions.audioDeviceID {
+                audioDevice = audioDevices.first { $0.uniqueID == id }
+                if audioDevice == nil { setup.notes.append("Selected audio device not connected – using automatic") }
+            }
+            if audioDevice == nil { audioDevice = Self.automaticAudioDevice(for: videoInput?.device, in: audioDevices) }
+            if let device = audioDevice {
+                do {
+                    let input = try AVCaptureDeviceInput(device: device)
+                    if session.canAddInput(input) {
+                        session.addInput(input)
+                        audioInput = input
+                    }
+                } catch {
+                    setup.notes.append("Audio: \(error.localizedDescription)")
+                }
+            } else if videoInput.map({ Self.isMS2109Video($0.device) }) ?? true {
+                setup.notes.append("Audio device “USB Digital Audio” not found")
+                debugLog("Audio devices found: \(audioDevices.map(\.localizedName).joined(separator: ", "))")
+            } else {
+                setup.notes.append("No audio device found for this source – choose one under Input")
+            }
+        }
+
+        applyVideoFormat()
+        session.commitConfiguration()
+        if session.isRunning == false { session.startRunning() }
+        // Beim Start setzt AVFoundation das Format gern zurück – danach erneut setzen.
+        let choice = applyVideoFormat()
+
+        let isMS2109 = audioInput.map { Self.isMS2109Audio($0.device) } ?? false
+        queue.async {
+            self.audioIsMS2109 = isMS2109
+            self.pending = nil
+        }
+
+        if let device = videoInput?.device {
+            setup.videoID = device.uniqueID
+            setup.videoName = device.localizedName
+            let d = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+            let fps = 1 / CMTimeGetSeconds(device.activeVideoMinFrameDuration)
+            setup.frameRate = fps.isFinite ? fps : nil
+            debugLog("Device “\(device.localizedName)”, active format \(d.width)x\(d.height) @ \(String(format: "%.2f", fps)) fps")
+            if let choice, choice.fps < Double(newOptions.frameRate) - 0.5 {
+                setup.notes.append("“\(device.localizedName)” delivers at most \(Int(choice.fps.rounded())) fps "
+                                   + "at \(choice.width)×\(choice.height)")
+            }
+        }
+        if let device = audioInput?.device {
+            setup.audioID = device.uniqueID
+            setup.audioName = device.localizedName
+        }
+        return setup
+    }
+
+    @discardableResult
+    private func applyVideoFormat() -> FormatChoice? {
+        guard let device = videoInput?.device,
+              let choice = Self.chooseFormat(device, frameRate: options.frameRate) else { return nil }
+        do {
+            try device.lockForConfiguration()
+            device.activeFormat = choice.format
+            device.activeVideoMinFrameDuration = choice.duration
+            device.unlockForConfiguration()
+        } catch {
+            debugLog("Can't configure the device: \(error)")
+        }
+        return choice
     }
 
     // MARK: Stream im Netzwerk
@@ -133,108 +416,24 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
     }
 
-    private func configure(audioAllowed: Bool) -> String? {
-        guard let m = Self.findVideoMode() else { return "No capture device found" }
-        mode = m
-        var note: String?
-
-        session.beginConfiguration()
-        do {
-            let input = try AVCaptureDeviceInput(device: m.device)
-            if session.canAddInput(input) { session.addInput(input) }
-        } catch {
-            session.commitConfiguration()
-            return "Video: \(error.localizedDescription)"
-        }
-        videoOutput.alwaysDiscardsLateVideoFrames = true
-        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
-        videoOutput.setSampleBufferDelegate(self, queue: queue)
-        if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
-
-        if audioAllowed == false {
-            note = "No microphone access – audio off"
-        } else if let audioDevice = Self.findAudioDevice() {
-            do {
-                let input = try AVCaptureDeviceInput(device: audioDevice)
-                if session.canAddInput(input) { session.addInput(input) }
-                audioOutput.setSampleBufferDelegate(self, queue: queue)
-                if session.canAddOutput(audioOutput) { session.addOutput(audioOutput) }
-            } catch {
-                note = "Audio: \(error.localizedDescription)"
-            }
-        } else {
-            note = "Audio device “USB Digital Audio” not found"
-            let names = AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio,
-                                                         position: .unspecified).devices.map(\.localizedName)
-            debugLog("Audio devices found: \(names.joined(separator: ", "))")
-        }
-        applyFormat()
-        session.commitConfiguration()
-
-        let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now() + 0.05, repeating: 0.05)
-        t.setEventHandler { [weak self] in self?.tick() }
-        t.resume()
-        timer = t
-
-        queue.async { [weak self] in
-            guard let self else { return }
-            self.session.startRunning()
-            // Beim Start setzt AVFoundation das Format gern zurück – danach erneut setzen.
-            self.applyFormat()
-            let d = CMVideoFormatDescriptionGetDimensions(m.device.activeFormat.formatDescription)
-            let fps = 1 / CMTimeGetSeconds(m.device.activeVideoMinFrameDuration)
-            debugLog("Device “\(m.device.localizedName)”, active format \(d.width)x\(d.height) @ \(String(format: "%.2f", fps)) fps")
-        }
-        return note
-    }
-
-    static func findVideoMode() -> VideoMode? {
-        let all = AVCaptureDevice.DiscoverySession(deviceTypes: [.external], mediaType: .video, position: .unspecified).devices
-        let devices = all.filter { $0.localizedName == "USB Video" } + all.filter { $0.localizedName != "USB Video" }
-        let nv12 = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        for device in devices {
-            for format in device.formats {
-                let dim = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-                guard CMFormatDescriptionGetMediaSubType(format.formatDescription) == nv12,
-                      dim.width == 1920, dim.height == 1080 else { continue }
-                if let range = format.videoSupportedFrameRateRanges.first(where: { abs($0.maxFrameRate - 30) < 0.01 }) {
-                    return VideoMode(device: device, format: format, range: range)
-                }
-            }
-        }
-        if let device = devices.first { return VideoMode(device: device, format: nil, range: nil) }
-        return nil
-    }
-
-    static func findAudioDevice() -> AVCaptureDevice? {
-        let devices = AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified).devices
-        return devices.first(where: { $0.localizedName == "USB Digital Audio" })
-            ?? devices.first(where: { $0.localizedName.localizedCaseInsensitiveContains("USB Digital Audio") })
-    }
-
-    private func applyFormat() {
-        guard let m = mode, let format = m.format else { return }
-        do {
-            try m.device.lockForConfiguration()
-            m.device.activeFormat = format
-            if let range = m.range { m.device.activeVideoMinFrameDuration = range.minFrameDuration }
-            m.device.unlockForConfiguration()
-        } catch {
-            debugLog("Can't configure the device: \(error)")
-        }
-    }
-
     // MARK: Aufnahme
 
-    func startRecording(to url: URL, bitRate: Int, completion: @escaping @MainActor (Error?) -> Void) {
+    func startRecording(to url: URL, bitRate: Int, codec: VideoCodec, frameRate: Int,
+                        completion: @escaping @MainActor (Error?) -> Void) {
         queue.async { [weak self] in
             guard let self else { return }
             do {
-                self.recorder = try Recorder(url: url,
-                                             width: self.videoW > 0 ? self.videoW : 1920,
-                                             height: self.videoH > 0 ? self.videoH : 1080,
-                                             bitRate: bitRate)
+                let recorder = try Recorder(url: url,
+                                            width: self.videoW > 0 ? self.videoW : 1920,
+                                            height: self.videoH > 0 ? self.videoH : 1080,
+                                            bitRate: bitRate, codec: codec, frameRate: frameRate)
+                recorder.onFailure = { [weak self, weak recorder] reason in
+                    guard let self, let recorder, self.recorder === recorder else { return }
+                    self.recorder = nil
+                    let url = recorder.url
+                    if let callback = self.onRecordingFailed { Self.onMain { callback(url, reason) } }
+                }
+                self.recorder = recorder
                 Self.onMain { completion(nil) }
             } catch {
                 Self.onMain { completion(error) }
@@ -242,15 +441,17 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
     }
 
-    func stopRecording(completion: @escaping @MainActor (URL?) -> Void) {
+    /// Beendet die Aufnahme; liefert die Datei und ihre Länge in Sekunden
+    func stopRecording(completion: @escaping @MainActor (URL?, Double) -> Void) {
         queue.async { [weak self] in
             guard let self else { return }
             guard let recorder = self.recorder else {
-                Self.onMain { completion(nil) }
+                Self.onMain { completion(nil, 0) }
                 return
             }
             self.recorder = nil
-            recorder.finish { url in Self.onMain { completion(url) } }
+            let duration = recorder.duration
+            recorder.finish { url in Self.onMain { completion(url, duration) } }
         }
     }
 
@@ -299,7 +500,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         DispatchQueue.main.async { MainActor.assumeIsolated { work() } }
     }
 
-    // MARK: Daten von der Karte
+    // MARK: Daten vom Gerät
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         if output === videoOutput {
@@ -319,41 +520,70 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
     }
 
+    /// Alle Kanäle als Float, verschachtelt (L R L R … bzw. bei Mono einfach hintereinander)
+    private static func readSamples(_ sampleBuffer: CMSampleBuffer, asbd: AudioStreamBasicDescription) -> [Float]? {
+        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        let bigEndian = (asbd.mFormatFlags & kAudioFormatFlagIsBigEndian) != 0
+        let nonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+        let channels = Int(asbd.mChannelsPerFrame)
+        guard (isFloat && asbd.mBitsPerChannel == 32) || (isFloat == false && asbd.mBitsPerChannel == 16) else { return nil }
+
+        func convert(_ raw: UnsafeRawBufferPointer) -> [Float] {
+            if isFloat {
+                return Array(raw.bindMemory(to: Float.self))
+            }
+            return raw.bindMemory(to: Int16.self).map { Float(bigEndian ? Int16(bigEndian: $0) : $0) / 32768 }
+        }
+
+        if nonInterleaved == false || channels == 1 {
+            // Ein Puffer mit allen Kanälen
+            guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return nil }
+            let length = CMBlockBufferGetDataLength(block)
+            var bytes = [UInt8](repeating: 0, count: length)
+            guard CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: &bytes) == kCMBlockBufferNoErr else {
+                return nil
+            }
+            let usable = length - length % (isFloat ? 4 : 2)
+            return bytes.withUnsafeBytes { convert(UnsafeRawBufferPointer(rebasing: $0[0..<usable])) }
+        }
+
+        // Ein Puffer pro Kanal: verschachteln
+        var needed = 0
+        CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(sampleBuffer, bufferListSizeNeededOut: &needed, bufferListOut: nil,
+                                                                bufferListSize: 0, blockBufferAllocator: nil,
+                                                                blockBufferMemoryAllocator: nil, flags: 0, blockBufferOut: nil)
+        guard needed > 0 else { return nil }
+        let raw = UnsafeMutableRawPointer.allocate(byteCount: needed, alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { raw.deallocate() }
+        let list = raw.bindMemory(to: AudioBufferList.self, capacity: 1)
+        var retained: CMBlockBuffer?
+        guard CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(sampleBuffer, bufferListSizeNeededOut: nil, bufferListOut: list,
+                                                                      bufferListSize: needed, blockBufferAllocator: nil,
+                                                                      blockBufferMemoryAllocator: nil,
+                                                                      flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+                                                                      blockBufferOut: &retained) == noErr else { return nil }
+        let planes = UnsafeMutableAudioBufferListPointer(list).compactMap { buffer -> [Float]? in
+            guard let data = buffer.mData else { return nil }
+            return convert(UnsafeRawBufferPointer(start: data, count: Int(buffer.mDataByteSize)))
+        }
+        guard let frames = planes.map(\.count).min(), frames > 0 else { return nil }
+        var out = [Float](repeating: 0, count: frames * planes.count)
+        for (channel, plane) in planes.enumerated() {
+            for index in 0..<frames { out[index * planes.count + channel] = plane[index] }
+        }
+        return out
+    }
+
     private func handleAudio(_ sampleBuffer: CMSampleBuffer) {
         guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee,
-              let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+              asbd.mChannelsPerFrame >= 1,
+              var samples = Self.readSamples(sampleBuffer, asbd: asbd) else { return }
         let channels = Int(asbd.mChannelsPerFrame)
-        guard channels == 1 || channels == 2 else { return }
-        let length = CMBlockBufferGetDataLength(block)
-        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-        let bigEndian = (asbd.mFormatFlags & kAudioFormatFlagIsBigEndian) != 0
-
-        var samples: [Float]
-        if isFloat && asbd.mBitsPerChannel == 32 {
-            samples = [Float](repeating: 0, count: length / 4)
-            let bytes = samples.count * 4
-            let status = samples.withUnsafeMutableBytes { raw -> OSStatus in
-                guard let base = raw.baseAddress else { return -1 }
-                return CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: bytes, destination: base)
-            }
-            guard status == noErr else { return }
-        } else if isFloat == false && asbd.mBitsPerChannel == 16 {
-            var ints = [Int16](repeating: 0, count: length / 2)
-            let bytes = ints.count * 2
-            let status = ints.withUnsafeMutableBytes { raw -> OSStatus in
-                guard let base = raw.baseAddress else { return -1 }
-                return CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: bytes, destination: base)
-            }
-            guard status == noErr else { return }
-            samples = ints.map { Float(bigEndian ? Int16(bigEndian: $0) : $0) / 32768 }
-        } else {
-            return
-        }
 
         var pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let rate: Double
-        if channels == 1 {
+        if channels == 1 && (audioIsMS2109 || asbd.mSampleRate >= 88_200) {
             // MS2109: Die „Mono“-Samples sind in Wahrheit abwechselnd links/rechts.
             if let p = pending {
                 samples.insert(p, at: 0)
@@ -362,9 +592,29 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             }
             if samples.count % 2 == 1 { pending = samples.removeLast() }
             rate = asbd.mSampleRate / 2
+        } else if channels == 1 {
+            // Echtes Mono: auf beide Kanäle
+            var stereo = [Float](repeating: 0, count: samples.count * 2)
+            for (index, sample) in samples.enumerated() {
+                stereo[index * 2] = sample
+                stereo[index * 2 + 1] = sample
+            }
+            samples = stereo
+            rate = asbd.mSampleRate
+        } else if channels > 2 {
+            // Mehrkanal: die ersten beiden Kanäle
+            let frames = samples.count / channels
+            var stereo = [Float](repeating: 0, count: frames * 2)
+            for index in 0..<frames {
+                stereo[index * 2] = samples[index * channels]
+                stereo[index * 2 + 1] = samples[index * channels + 1]
+            }
+            samples = stereo
+            rate = asbd.mSampleRate
         } else {
             rate = asbd.mSampleRate
         }
+        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
         audioInfo = "\(Int(asbd.mSampleRate)) Hz, \(channels) ch, \(isFloat ? "Float" : "Int") \(asbd.mBitsPerChannel) bit → \(Int(rate)) Hz stereo"
         guard samples.count >= 2 else { return }
 
@@ -381,7 +631,10 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             peakR = max(peakR, abs(samples[i + 1]))
             i += 2
         }
-        if monitor.isRunning == false { monitor.start(sampleRate: rate) }
+        if monitorRate != rate {
+            monitor.start(sampleRate: rate)
+            monitorRate = rate
+        }
         monitor.push(samples)
         recorder?.appendAudio(samples, rate: rate, pts: pts)
         stream?.encoder.encodeAudio(samples, sampleRate: rate, hostTime: pts)

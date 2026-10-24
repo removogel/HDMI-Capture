@@ -49,8 +49,13 @@ final class AudioMonitor {
         return Int(Double(frames) / sampleRate * 1000)
     }
 
+    /// Startet die Wiedergabe – oder startet sie mit neuer Abtastrate neu (anderes Audiogerät)
     func start(sampleRate: Double) {
-        guard source == nil, let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else { return }
+        if source != nil {
+            guard sampleRate != self.sampleRate else { return }
+            teardown()
+        }
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else { return }
         self.sampleRate = sampleRate
         target = Int(sampleRate * 0.05)
         maxLatency = Int(sampleRate * 0.25)
@@ -80,6 +85,20 @@ final class AudioMonitor {
     func stop() {
         engine.stop()
         isRunning = false
+    }
+
+    private func teardown() {
+        engine.stop()
+        isRunning = false
+        if let source { engine.detach(source) }
+        source = nil
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        observer = nil
+        os_unfair_lock_lock(lock)
+        readPos = 0
+        available = 0
+        primed = false
+        os_unfair_lock_unlock(lock)
     }
 
     /// Nimmt verschachtelte Stereo-Samples (L R L R …) entgegen.

@@ -7,10 +7,26 @@ struct StreamAddresses {
     /// IP-Adresse des Macs im lokalen Netz
     let host: String
     let ts: String
+    let hls: String
     let dash: String
     let rtsp: String
+    /// Infoseite mit Player
+    let page: String
 
-    var summary: String { "MPEG-TS: \(ts)\nMPEG-DASH: \(dash)\nRTSP: \(rtsp)" }
+    /// Name und Adresse in der Reihenfolge, in der sie angezeigt werden
+    var all: [(name: String, url: String)] {
+        [("MPEG-TS", ts), ("HLS", hls), ("MPEG-DASH", dash), ("RTSP", rtsp)]
+    }
+
+    var summary: String { all.map { "\($0.name): \($0.url)" }.joined(separator: "\n") }
+
+    /// Link, der den Stream direkt in VLC öffnet (iPad, iPhone)
+    static func vlcLink(_ url: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        let encoded = url.addingPercentEncoding(withAllowedCharacters: allowed) ?? url
+        return "vlc-x-callback://x-callback-url/stream?url=\(encoded)"
+    }
 }
 
 enum StreamError: LocalizedError {
@@ -23,8 +39,8 @@ enum StreamError: LocalizedError {
     }
 }
 
-/// Stellt den Stream im lokalen Netz bereit:
-/// MPEG-TS über HTTP (`/live.ts`), MPEG-DASH (`/dash/live.mpd`) auf Port 8080 und RTSP auf Port 8554.
+/// Stellt den Stream im lokalen Netz bereit: MPEG-TS über HTTP (`/live.ts`), HLS (`/hls/live.m3u8`)
+/// und MPEG-DASH (`/dash/live.mpd`) auf Port 8080, RTSP auf Port 8554.
 /// Der Encoder wird von der Capture-Queue gefüttert; alles andere läuft auf der eigenen Stream-Queue.
 final class StreamService {
     static let httpPort: UInt16 = 8080
@@ -45,7 +61,8 @@ final class StreamService {
     private var http: HTTPServer?
     private var rtsp: RTSPServer?
     private var tsClients: [ObjectIdentifier: TSClient] = [:]
-    private var dashViewers: [String: Double] = [:]
+    /// Zuschauer per DASH oder HLS (ohne dauerhafte Verbindung): Adresse → letzter Abruf
+    private var segmentViewers: [String: Double] = [:]
     private var waiters: [Waiter] = []
     private var timer: DispatchSourceTimer?
     private var viewerCount = 0
@@ -126,7 +143,7 @@ final class StreamService {
             waiters.removeAll()
             open.forEach { $0.finish() }
             tsClients.removeAll()
-            dashViewers.removeAll()
+            segmentViewers.removeAll()
             onViewers?(0)
         }
     }
@@ -137,7 +154,7 @@ final class StreamService {
             accessList = list
             http?.closeDisallowed()
             rtsp?.closeDisallowed()
-            dashViewers = dashViewers.filter { list.allows(address: $0.key) }
+            segmentViewers = segmentViewers.filter { list.allows(address: $0.key) }
             updateViewers()
         }
     }
@@ -232,7 +249,7 @@ final class StreamService {
             }
             updateViewers()
         case "/dash/live.mpd":
-            dashViewers[connection.remoteHost] = now()
+            segmentViewers[connection.remoteHost] = now()
             // Kurz warten, bis Bild und Ton bekannt sind – sonst fehlt der Ton im Manifest
             respondWhenReady(connection, timeout: 3, headOnly: headOnly, isReady: { [weak self] in
                 self?.dash.isComplete ?? true
@@ -240,17 +257,40 @@ final class StreamService {
                 guard let manifest = self?.dash.manifest() else { return nil }
                 return ("application/dash+xml", Array(manifest.utf8))
             })
+        case "/hls/live.m3u8":
+            segmentViewers[connection.remoteHost] = now()
+            // Wie beim DASH-Manifest: Bild und Ton abwarten, damit die Ton-Rendition nicht fehlt
+            respondWhenReady(connection, timeout: 3, headOnly: headOnly, isReady: { [weak self] in
+                self?.dash.isComplete ?? true
+            }, content: { [weak self] in
+                guard let playlist = self?.dash.hlsMasterPlaylist() else { return nil }
+                return (Self.playlistType, Array(playlist.utf8))
+            })
+        case "/hls/video.m3u8", "/hls/audio.m3u8":
+            segmentViewers[connection.remoteHost] = now()
+            let track: DashPackager.Track = request.path == "/hls/video.m3u8" ? .video : .audio
+            respondWhenReady(connection, timeout: 8, headOnly: headOnly, isReady: { [weak self] in
+                self?.dash.hasHLSSegments(track) ?? true
+            }, content: { [weak self] in
+                guard let playlist = self?.dash.hlsMediaPlaylist(track) else { return nil }
+                return (Self.playlistType, Array(playlist.utf8))
+            })
         default:
             if request.path.hasPrefix("/dash/") {
-                serveDashFile(String(request.path.dropFirst(6)), connection, headOnly: headOnly)
+                serveSegmentFile(String(request.path.dropFirst(6)), connection, headOnly: headOnly)
+            } else if request.path.hasPrefix("/hls/") {
+                serveSegmentFile(String(request.path.dropFirst(5)), connection, headOnly: headOnly)
             } else {
                 connection.respond(status: 404)
             }
         }
     }
 
-    private func serveDashFile(_ name: String, _ connection: HTTPConnection, headOnly: Bool) {
-        dashViewers[connection.remoteHost] = now()
+    private static let playlistType = "application/vnd.apple.mpegurl"
+
+    /// Init- und Media-Segmente – dieselben Dateien für DASH (`/dash/…`) und HLS (`/hls/…`)
+    private func serveSegmentFile(_ name: String, _ connection: HTTPConnection, headOnly: Bool) {
+        segmentViewers[connection.remoteHost] = now()
         switch name {
         case "video_init.mp4", "audio_init.mp4":
             let isVideo = name.hasPrefix("video")
@@ -317,13 +357,13 @@ final class StreamService {
         for waiter in current {
             if waiter.isReady() || time > waiter.deadline { waiter.finish() } else { waiters.append(waiter) }
         }
-        // DASH hat keine dauerhafte Verbindung: Wer in den letzten 10 s etwas abgerufen hat, schaut zu
-        dashViewers = dashViewers.filter { time - $0.value < 10 }
+        // DASH und HLS haben keine dauerhafte Verbindung: Wer in den letzten 10 s etwas abgerufen hat, schaut zu
+        segmentViewers = segmentViewers.filter { time - $0.value < 10 }
         updateViewers()
     }
 
     private func updateViewers() {
-        let count = tsClients.count + (rtsp?.playingCount ?? 0) + dashViewers.count
+        let count = tsClients.count + (rtsp?.playingCount ?? 0) + segmentViewers.count
         guard count != viewerCount else { return }
         viewerCount = count
         onViewers?(count)
@@ -336,8 +376,10 @@ final class StreamService {
     static func addresses(host: String) -> StreamAddresses {
         StreamAddresses(host: host,
                         ts: "http://\(host):\(httpPort)/live.ts",
+                        hls: "http://\(host):\(httpPort)/hls/live.m3u8",
                         dash: "http://\(host):\(httpPort)/dash/live.mpd",
-                        rtsp: "rtsp://\(host):\(rtspPort)/live")
+                        rtsp: "rtsp://\(host):\(rtspPort)/live",
+                        page: "http://\(host):\(httpPort)/")
     }
 
     /// IPv4-Adresse im lokalen Netz, bevorzugt WLAN/Ethernet (en0, en1 …)
@@ -383,16 +425,10 @@ final class StreamService {
                 .replacingOccurrences(of: ">", with: "&gt;")
                 .replacingOccurrences(of: "\"", with: "&quot;")
         }
-        func vlcLink(_ url: String) -> String {
-            var allowed = CharacterSet.alphanumerics
-            allowed.insert(charactersIn: "-._~")
-            let encoded = url.addingPercentEncoding(withAllowedCharacters: allowed) ?? url
-            return "vlc-x-callback://x-callback-url/stream?url=\(encoded)"
-        }
         var rows = ""
-        for (name, url) in [("MPEG-TS", addresses.ts), ("MPEG-DASH", addresses.dash), ("RTSP", addresses.rtsp)] {
+        for (name, url) in addresses.all {
             rows += "<tr><th>\(name)</th><td><code>\(escape(url))</code></td>"
-            rows += "<td><a href=\"\(escape(vlcLink(url)))\">Open in VLC</a></td></tr>\n"
+            rows += "<td><a href=\"\(escape(StreamAddresses.vlcLink(url)))\">Open in VLC</a></td></tr>\n"
         }
         return """
         <!doctype html>
@@ -407,6 +443,9 @@ final class StreamService {
         h2 { font-size: 1.1em; margin: 1.8em 0 .4em; }
         .player { position: relative; background: #000; border-radius: 8px; overflow: hidden; aspect-ratio: 16 / 9; }
         video { width: 100%; height: 100%; display: block; background: #000; }
+        #start { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 16px; text-align: center; background: rgba(0,0,0,.6); }
+        #start button { font: inherit; padding: .7em 1.3em; min-width: 16em; border: 0; border-radius: 8px; background: rgba(255,255,255,.92); color: #000; cursor: pointer; }
+        #start .hint { color: #aaa; font-size: 13px; }
         #unmute { position: absolute; top: 12px; right: 12px; font: inherit; font-size: 14px; padding: .45em .9em; border: 0; border-radius: 6px; background: rgba(255,255,255,.88); color: #000; cursor: pointer; }
         #stats { font-variant-numeric: tabular-nums; color: #9c9; margin: .6em 0 0; min-height: 1.4em; }
         table { border-collapse: collapse; width: 100%; }
@@ -419,38 +458,110 @@ final class StreamService {
         <body>
         <h1>HDMI Capture</h1>
         <div class="player">
-        <video id="video" controls playsinline autoplay muted></video>
-        <button id="unmute" type="button">Unmute</button>
+        <video id="video" controls playsinline></video>
+        <div id="start">
+        <button id="play-dash" type="button">▶ Play with dash.js (MPEG-DASH)</button>
+        <button id="play-hls" type="button" hidden>▶ Play natively (HLS)</button>
+        <span class="hint">Nothing plays until you start it. dash.js is loaded from the internet; HLS needs no internet access.</span>
         </div>
-        <p id="stats">Loading dash.js …</p>
+        <button id="unmute" type="button" hidden>Unmute</button>
+        </div>
+        <p id="stats"></p>
         <h2>Addresses for VLC and other players</h2>
         <p>In VLC: <b>Network → Open Network Stream</b> and enter one of the addresses.</p>
         <table>
         \(rows)</table>
-        <p>MPEG-TS has the shortest delay. RTSP runs over TCP. The player above uses MPEG-DASH with
-        dash.js \(Self.dashJSVersion), so this device needs internet access.</p>
+        <p>MPEG-TS has the shortest delay. HLS plays natively in Safari (iPad, iPhone, Mac) and can be sent to an Apple TV
+        with AirPlay. RTSP runs over TCP. The dash.js player (version \(Self.dashJSVersion)) is only loaded when you start it.</p>
         <script>
         (function () {
           var video = document.getElementById('video');
           var stats = document.getElementById('stats');
           var unmute = document.getElementById('unmute');
+          var start = document.getElementById('start');
+          var dashButton = document.getElementById('play-dash');
+          var hlsButton = document.getElementById('play-hls');
           var sources = [
             'https://cdn.dashjs.org/v\(Self.dashJSVersion)/modern/umd/dash.all.min.js',
             'https://cdn.dashjs.org/v\(Self.dashJSVersion)/legacy/umd/dash.all.min.js'
           ];
+          var timer = null;
+          if (video.canPlayType('application/vnd.apple.mpegurl')) { hlsButton.hidden = false; }
+
           function seconds(value) { return value.toFixed(1) + ' s'; }
+          function quiet(promise) { if (promise && promise.catch) { promise.catch(function () {}); } }
+          // Nur, wenn der Browser Ton ohne weitere Geste verweigert: stumm starten, Knopf zum Einschalten zeigen
+          function playMuted() {
+            video.muted = true;
+            unmute.hidden = false;
+            quiet(video.play());
+          }
+          function begin() {
+            start.style.display = 'none';
+            video.muted = false;
+          }
+          function showStats(collect) {
+            if (timer) { clearInterval(timer); }
+            timer = setInterval(function () {
+              var parts = collect();
+              if (video.videoWidth) { parts.push(video.videoWidth + '×' + video.videoHeight); }
+              if (parts.length) { stats.textContent = parts.join(' · '); }
+            }, 500);
+          }
+          function bufferAhead() {
+            if (!video.buffered.length) { return null; }
+            var ahead = video.buffered.end(video.buffered.length - 1) - video.currentTime;
+            return ahead >= 0 ? ahead : null;
+          }
+
+          dashButton.addEventListener('click', function () {
+            begin();
+            // Noch innerhalb des Klicks: Safari erlaubt dann später die Wiedergabe mit Ton
+            quiet(video.play());
+            stats.textContent = 'Loading dash.js …';
+            load(0);
+          });
+
+          hlsButton.addEventListener('click', function () {
+            begin();
+            video.src = 'hls/live.m3u8';
+            var playing = video.play();
+            if (playing && playing.catch) {
+              playing.catch(function (error) { if (error && error.name === 'NotAllowedError') { playMuted(); } });
+            }
+            stats.textContent = 'Starting HLS …';
+            showStats(function () {
+              var parts = ['HLS'];
+              var date = video.getStartDate ? video.getStartDate() : null;
+              if (date && !isNaN(date.getTime())) {
+                var latency = (Date.now() - date.getTime()) / 1000 - video.currentTime;
+                if (latency > 0 && latency < 600) { parts.push('Latency ' + seconds(latency)); }
+              }
+              var buffer = bufferAhead();
+              if (buffer !== null) { parts.push('Buffer ' + seconds(buffer)); }
+              return parts;
+            });
+          });
+
+          unmute.addEventListener('click', function () {
+            video.muted = false;
+            quiet(video.play());
+            unmute.hidden = true;
+          });
+
           function load(index) {
             if (index >= sources.length) {
-              stats.textContent = 'Could not load dash.js – this device needs internet access. Alternatively, open one of the addresses below in VLC.';
+              stats.textContent = 'Could not load dash.js – this device needs internet access. Use HLS or open one of the addresses below in VLC.';
+              start.style.display = '';
               return;
             }
             var script = document.createElement('script');
             script.src = sources[index];
-            script.onload = start;
+            script.onload = startDash;
             script.onerror = function () { load(index + 1); };
             document.head.appendChild(script);
           }
-          function start() {
+          function startDash() {
             var player = dashjs.MediaPlayer().create();
             try {
               // Latenzziel kommt aus dem MPD (ServiceDescription); bei Rückstand leicht schneller abspielen
@@ -460,9 +571,12 @@ final class StreamService {
               var error = event && event.error;
               stats.textContent = 'Error: ' + (error && error.message ? error.message : 'unknown');
             });
+            if (dashjs.MediaPlayer.events.PLAYBACK_NOT_ALLOWED) {
+              player.on(dashjs.MediaPlayer.events.PLAYBACK_NOT_ALLOWED, playMuted);
+            }
             player.initialize(video, 'dash/live.mpd', true);
-            setInterval(function () {
-              var parts = [];
+            showStats(function () {
+              var parts = ['DASH'];
               try {
                 var latency = player.getCurrentLiveLatency();
                 if (latency > 0) { parts.push('Latency ' + seconds(latency)); }
@@ -471,16 +585,9 @@ final class StreamService {
                 var buffer = player.getBufferLength('video');
                 if (buffer >= 0) { parts.push('Buffer ' + seconds(buffer)); }
               } catch (e) {}
-              if (video.videoWidth) { parts.push(video.videoWidth + '×' + video.videoHeight); }
-              if (parts.length) { stats.textContent = parts.join(' · '); }
-            }, 500);
+              return parts;
+            });
           }
-          unmute.addEventListener('click', function () {
-            video.muted = false;
-            video.play();
-            unmute.style.display = 'none';
-          });
-          load(0);
         })();
         </script>
         </body>
