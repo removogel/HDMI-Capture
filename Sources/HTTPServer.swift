@@ -112,7 +112,7 @@ final class HTTPConnection {
         if case let .hostPort(host, _) = connection.endpoint {
             remoteHost = "\(host)"
         } else {
-            remoteHost = "unbekannt"
+            remoteHost = "unknown"
         }
     }
 

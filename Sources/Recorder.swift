@@ -3,7 +3,7 @@ import CoreMedia
 
 enum RecorderError: LocalizedError {
     case setup
-    var errorDescription: String? { "Aufnahme konnte nicht eingerichtet werden" }
+    var errorDescription: String? { "Couldn't set up the recording" }
 }
 
 /// Schreibt Video (H.264, Hardware) und den korrigierten Stereoton (AAC) in eine MP4-Datei.
@@ -49,7 +49,7 @@ final class Recorder {
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if started == false {
             guard writer.status == .unknown, writer.startWriting() else {
-                debugLog("Aufnahme startet nicht: \(String(describing: writer.error))")
+                debugLog("Recording failed to start: \(String(describing: writer.error))")
                 return
             }
             writer.startSession(atSourceTime: pts)
@@ -93,7 +93,7 @@ final class Recorder {
         let url = self.url
         writer.finishWriting {
             if writer.status != .completed {
-                debugLog("Aufnahme fehlgeschlagen: \(String(describing: writer.error))")
+                debugLog("Recording failed: \(String(describing: writer.error))")
             }
             done(writer.status == .completed ? url : nil)
         }

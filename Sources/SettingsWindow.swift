@@ -21,25 +21,25 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 640),
                               styleMask: [.titled, .closable],
                               backing: .buffered, defer: false)
-        window.title = "Einstellungen"
+        window.title = "Settings"
         window.isReleasedWhenClosed = false
         super.init(window: window)
         buildContent(text: text, segmentFrames: segmentFrames, streamMbits: streamMbits, recordingMbits: recordingMbits)
         window.center()
     }
 
-    required init?(coder: NSCoder) { fatalError("nicht unterstützt") }
+    required init?(coder: NSCoder) { fatalError("not supported") }
 
     private func buildContent(text: String, segmentFrames: Int, streamMbits: Int, recordingMbits: Int) {
         guard let content = window?.contentView else { return }
 
-        let title = NSTextField(labelWithString: "Stream: Zugriff erlauben aus")
+        let title = NSTextField(labelWithString: "Stream: allow access from")
         title.font = .boldSystemFont(ofSize: 13)
 
         let explanation = NSTextField(wrappingLabelWithString:
-            "Ein Netz pro Zeile, zum Beispiel 192.168.x.x, 10.x.x.x, 192.168.178.0/24 oder eine einzelne Adresse "
-            + "wie 192.168.178.30. IPv6 geht auch (fd00::/8). Text nach # ist ein Kommentar. "
-            + "Verbindungen von anderen Adressen lehnt die App ab. Der Mac selbst hat immer Zugriff.")
+            "One network per line, for example 192.168.x.x, 10.x.x.x, 192.168.178.0/24 or a single address "
+            + "such as 192.168.178.30. IPv6 works too (fd00::/8). Text after # is a comment. "
+            + "The app refuses connections from other addresses. This Mac always has access.")
         explanation.font = .systemFont(ofSize: 11)
         explanation.textColor = .secondaryLabelColor
 
@@ -58,19 +58,19 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
 
         statusLabel.font = .systemFont(ofSize: 11)
 
-        let resetButton = NSButton(title: "Standard wiederherstellen", target: self, action: #selector(resetToDefault))
+        let resetButton = NSButton(title: "Restore Default", target: self, action: #selector(resetToDefault))
         resetButton.bezelStyle = .rounded
 
         // DASH-Segmentlänge
         let separator = NSBox()
         separator.boxType = .separator
-        let dashTitle = NSTextField(labelWithString: "MPEG-DASH: Segmentlänge")
+        let dashTitle = NSTextField(labelWithString: "MPEG-DASH: segment length")
         dashTitle.font = .boldSystemFont(ofSize: 13)
         for frames in StreamSettings.segmentChoices {
             var itemTitle = StreamSettings.label(frames: frames)
-            if frames == 16 { itemTitle += " – geringste Verzögerung" }
-            if frames == StreamSettings.defaultSegmentFrames { itemTitle += " (Standard)" }
-            if frames == 64 { itemTitle += " – robuster bei schwachem WLAN" }
+            if frames == 16 { itemTitle += " – lowest latency" }
+            if frames == StreamSettings.defaultSegmentFrames { itemTitle += " (default)" }
+            if frames == 64 { itemTitle += " – more robust on weak Wi-Fi" }
             segmentPopup.addItem(withTitle: itemTitle)
             segmentPopup.lastItem?.tag = frames
         }
@@ -78,21 +78,21 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
         segmentPopup.target = self
         segmentPopup.action = #selector(segmentChanged)
         let dashExplanation = NSTextField(wrappingLabelWithString:
-            "Kürzere Segmente verringern die Verzögerung bei Playern, die einige Segmente Abstand zur Live-Kante halten "
-            + "(z. B. dash.js). Die Längen sind so gewählt, dass Bild- und Ton-Segmente exakt gleich lang sind. "
-            + "Die Änderung gilt beim nächsten Start des Streams.")
+            "Shorter segments reduce the delay in players that stay a few segments behind the live edge "
+            + "(e.g. dash.js). The lengths are chosen so that video and audio segments are exactly the same length. "
+            + "Takes effect the next time streaming starts.")
         dashExplanation.font = .systemFont(ofSize: 11)
         dashExplanation.textColor = .secondaryLabelColor
 
         // Videobitraten
         let bitRateSeparator = NSBox()
         bitRateSeparator.boxType = .separator
-        let bitRateTitle = NSTextField(labelWithString: "Videobitrate (H.264)")
+        let bitRateTitle = NSTextField(labelWithString: "Video bit rate (H.264)")
         bitRateTitle.font = .boldSystemFont(ofSize: 13)
         for (popup, value) in [(streamBitRatePopup, streamMbits), (recordingBitRatePopup, recordingMbits)] {
             for mbits in StreamSettings.bitRateChoices {
                 var itemTitle = "\(mbits) Mbit/s"
-                if mbits == StreamSettings.defaultBitRate { itemTitle += " (Standard)" }
+                if mbits == StreamSettings.defaultBitRate { itemTitle += " (default)" }
                 popup.addItem(withTitle: itemTitle)
                 popup.lastItem?.tag = mbits
             }
@@ -101,13 +101,13 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
             popup.action = #selector(bitRateChanged(_:))
         }
         let bitRateGrid = NSGridView(views: [[NSTextField(labelWithString: "Stream:"), streamBitRatePopup],
-                                             [NSTextField(labelWithString: "Aufnahme:"), recordingBitRatePopup]])
+                                             [NSTextField(labelWithString: "Recording:"), recordingBitRatePopup]])
         bitRateGrid.rowSpacing = 8
         bitRateGrid.columnSpacing = 10
         let bitRateExplanation = NSTextField(wrappingLabelWithString:
-            "Höhere Bitraten geben ein besseres Bild. Im WLAN sind 16 Mbit/s meist problemlos, 30 Mbit/s eher "
-            + "per Kabel oder bei gutem Empfang. Stream: gilt beim nächsten Start des Streams. "
-            + "Aufnahme: gilt bei der nächsten Aufnahme.")
+            "Higher bit rates give a better picture. 16 Mbit/s is usually fine over Wi-Fi, 30 Mbit/s is better "
+            + "suited to a cable or good reception. Stream: applies the next time streaming starts. "
+            + "Recording: applies to the next recording.")
         bitRateExplanation.font = .systemFont(ofSize: 11)
         bitRateExplanation.textColor = .secondaryLabelColor
 
@@ -164,13 +164,13 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
     private func updateStatus() {
         let list = NetworkAccessList(text: textView.string)
         if list.invalidLines.isEmpty == false {
-            statusLabel.stringValue = "Nicht erkannt: " + list.invalidLines.joined(separator: ", ")
+            statusLabel.stringValue = "Not recognized: " + list.invalidLines.joined(separator: ", ")
             statusLabel.textColor = .systemRed
         } else if list.subnets.isEmpty {
-            statusLabel.stringValue = "Kein Netz freigegeben – nur der Mac selbst kann den Stream abrufen."
+            statusLabel.stringValue = "No network allowed – only this Mac can watch the stream."
             statusLabel.textColor = .systemOrange
         } else {
-            statusLabel.stringValue = "Freigegeben: " + list.summary
+            statusLabel.stringValue = "Allowed: " + list.summary
             statusLabel.textColor = .secondaryLabelColor
         }
     }

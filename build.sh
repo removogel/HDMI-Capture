@@ -11,13 +11,13 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 for arch in arm64 x86_64; do
-    echo "▸ Kompiliere ($arch) …"
+    echo "▸ Compiling ($arch) …"
     swiftc -O -swift-version 5 -target "$arch-apple-macos$MIN_MACOS" Sources/*.swift -o "build/HDMICapture-$arch"
 done
 lipo -create build/HDMICapture-arm64 build/HDMICapture-x86_64 -output "$APP/Contents/MacOS/HDMICapture"
 
 if [ ! -f build/AppIcon.icns ]; then
-    echo "▸ Erzeuge Icon …"
+    echo "▸ Generating icon …"
     if swiftc -O Tools/MakeIcon.swift -o build/makeicon && build/makeicon build/icon_1024.png; then
         rm -rf build/AppIcon.iconset
         mkdir -p build/AppIcon.iconset
@@ -26,9 +26,9 @@ if [ ! -f build/AppIcon.icns ]; then
             sips -z $s $s build/icon_1024.png --out "build/AppIcon.iconset/icon_${s}x${s}.png" >/dev/null
             sips -z $d $d build/icon_1024.png --out "build/AppIcon.iconset/icon_${s}x${s}@2x.png" >/dev/null
         done
-        iconutil -c icns build/AppIcon.iconset -o build/AppIcon.icns || echo "  (Icon übersprungen)"
+        iconutil -c icns build/AppIcon.iconset -o build/AppIcon.icns || echo "  (icon skipped)"
     else
-        echo "  (Icon übersprungen)"
+        echo "  (icon skipped)"
     fi
 fi
 if [ -f build/AppIcon.icns ]; then cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"; fi
@@ -39,4 +39,4 @@ if [ -n "${VERSION:-}" ]; then
     plutil -replace CFBundleVersion -string "$VERSION" "$APP/Contents/Info.plist"
 fi
 codesign --force --sign - "$APP"
-echo "✓ Fertig: $APP ($(lipo -archs "$APP/Contents/MacOS/HDMICapture"))"
+echo "✓ Done: $APP ($(lipo -archs "$APP/Contents/MacOS/HDMICapture"))"

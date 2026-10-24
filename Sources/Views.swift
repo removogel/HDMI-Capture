@@ -17,7 +17,7 @@ final class PreviewView: NSView {
         layer?.addSublayer(previewLayer)
     }
 
-    required init?(coder: NSCoder) { fatalError("nicht unterstützt") }
+    required init?(coder: NSCoder) { fatalError("not supported") }
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -56,7 +56,7 @@ final class ShutterView: NSView {
         alphaValue = 0
     }
 
-    required init?(coder: NSCoder) { fatalError("nicht unterstützt") }
+    required init?(coder: NSCoder) { fatalError("not supported") }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 

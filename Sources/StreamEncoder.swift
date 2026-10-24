@@ -95,7 +95,7 @@ struct StreamSettings {
 
     static func label(frames: Int) -> String {
         let seconds = Double(frames) / Double(frameRate)
-        return String(format: "%.3f s", seconds).replacingOccurrences(of: ".", with: ",")
+        return String(format: "%.3f s", seconds)
     }
 }
 
@@ -199,7 +199,7 @@ final class StreamEncoder {
             guard encodeStatus == noErr, let sampleBuffer else { return }
             self?.handleEncodedVideo(sampleBuffer)
         }
-        if status != noErr { debugLog("Videokodierung für den Stream fehlgeschlagen: \(status)") }
+        if status != noErr { debugLog("Stream video encoding failed: \(status)") }
     }
 
     private func createSession(width: Int, height: Int) {
@@ -217,7 +217,7 @@ final class StreamEncoder {
                                                 refcon: nil,
                                                 compressionSessionOut: &created)
         guard status == noErr, let created else {
-            debugLog("H.264-Encoder startet nicht: \(status)")
+            debugLog("H.264 encoder failed to start: \(status)")
             return
         }
         Self.set(created, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
@@ -236,13 +236,13 @@ final class StreamEncoder {
         sessionWidth = width
         sessionHeight = height
         nextKeyframe = 0
-        debugLog("Stream-Encoder: H.264 \(width)x\(height), \(bitRate / 1_000_000) Mbit/s, "
-                 + "Keyframe alle \(StreamSettings.label(frames: min(settings.segmentFrames, 32)))")
+        debugLog("Stream encoder: H.264 \(width)x\(height), \(bitRate / 1_000_000) Mbit/s, "
+                 + "keyframe every \(StreamSettings.label(frames: min(settings.segmentFrames, 32)))")
     }
 
     private static func set(_ session: VTCompressionSession, _ key: CFString, _ value: CFTypeRef) {
         let status = VTSessionSetProperty(session, key: key, value: value)
-        if status != noErr { debugLog("Encoder-Einstellung \(key) nicht übernommen: \(status)") }
+        if status != noErr { debugLog("Encoder setting \(key) not applied: \(status)") }
     }
 
     /// Läuft auf einem Thread von VideoToolbox
@@ -352,7 +352,7 @@ final class StreamEncoder {
                                                       mReserved: 0)
         guard let aac = AVAudioFormat(streamDescription: &description),
               let created = AVAudioConverter(from: pcm, to: aac) else {
-            debugLog("AAC-Encoder startet nicht (\(rate) Hz)")
+            debugLog("AAC encoder failed to start (\(rate) Hz)")
             return
         }
         created.bitRate = StreamSettings.audioBitRate
@@ -382,7 +382,7 @@ final class StreamEncoder {
             return buffer
         }
         if status == .error {
-            debugLog("AAC-Kodierung fehlgeschlagen: \(error?.localizedDescription ?? "unbekannt")")
+            debugLog("AAC encoding failed: \(error?.localizedDescription ?? "unknown")")
             return
         }
         guard let descriptions = output.packetDescriptions else { return }

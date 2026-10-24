@@ -112,11 +112,9 @@ buffer level to the terminal every 10 seconds:
 | ⌘S | Save screenshot |
 | ⌘C | Copy current frame to the clipboard |
 | ⌘K | Start / stop streaming |
-| ⌘, | Settings (allowed networks for the stream) |
+| ⌘, | Settings (allowed networks, DASH segment length, bit rates) |
 | ⌘L | Swap left/right channels |
 | ⌘↑ / ⌘↓ | Volume up / down |
 | ⌃⌘F, double-click | Full screen |
 | Esc | Exit full screen |
 | ⌘T | Always on top |
-
-The app's user interface is in German.

@@ -9,10 +9,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var preview: PreviewView!
     private let controls = NSVisualEffectView()
     private let statusPill = NSVisualEffectView()
-    private let statusLabel = NSTextField(labelWithString: "Starte …")
-    private let recordButton = NSButton(title: "Aufnahme", target: nil, action: nil)
-    private let swapBox = NSButton(checkboxWithTitle: "L/R tauschen", target: nil, action: nil)
-    private let pinBox = NSButton(checkboxWithTitle: "Immer oben", target: nil, action: nil)
+    private let statusLabel = NSTextField(labelWithString: "Starting …")
+    private let recordButton = NSButton(title: "Record", target: nil, action: nil)
+    private let swapBox = NSButton(checkboxWithTitle: "Swap L/R", target: nil, action: nil)
+    private let pinBox = NSButton(checkboxWithTitle: "Always on top", target: nil, action: nil)
     private let volumeSlider = NSSlider(value: 1, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let meter = LevelMeterView()
     private let fullscreenButton = NSButton(title: "", target: nil, action: nil)
@@ -35,7 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var streamStarting = false
     private var viewers = 0
     private var streamAddresses: StreamAddresses?
-    private var modeText = "Warte auf Bild …"
+    private var modeText = "Waiting for video …"
     private var flashText: String?
     private var flashID = 0
     private var shownLevels: (Float, Float) = (0, 0)
@@ -67,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
 
         activity = ProcessInfo.processInfo.beginActivity(options: [.idleDisplaySleepDisabled, .userInitiated],
-                                                         reason: "Live-Vorschau der Capture-Karte")
+                                                         reason: "Live preview of the capture card")
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(preview)
         NSApp.activate()
@@ -123,14 +123,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         recordButton.contentTintColor = .systemRed
         snapshotButton.target = self
         snapshotButton.action = #selector(takeSnapshot(_:))
-        snapshotButton.image = NSImage(systemSymbolName: "camera", accessibilityDescription: "Bildschirmfoto")
+        snapshotButton.image = NSImage(systemSymbolName: "camera", accessibilityDescription: "Screenshot")
         snapshotButton.imagePosition = .imageOnly
-        snapshotButton.toolTip = "Bildschirmfoto sichern (⌘S)"
+        snapshotButton.toolTip = "Save screenshot (⌘S)"
         streamButton.target = self
         streamButton.action = #selector(toggleStreaming(_:))
         streamButton.image = NSImage(systemSymbolName: "dot.radiowaves.left.and.right", accessibilityDescription: "Stream")
         streamButton.imagePosition = .imageLeading
-        streamButton.toolTip = "Stream im lokalen Netzwerk ein-/ausschalten (⌘K)"
+        streamButton.toolTip = "Start/stop streaming to the local network (⌘K)"
         swapBox.target = self
         swapBox.action = #selector(toggleSwap(_:))
         swapBox.state = defaults.bool(forKey: "swapChannels") ? .on : .off
@@ -143,12 +143,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         volumeSlider.controlSize = .small
         fullscreenButton.target = self
         fullscreenButton.action = #selector(toggleFullscreen(_:))
-        fullscreenButton.image = NSImage(systemSymbolName: "arrow.up.left.and.arrow.down.right", accessibilityDescription: "Vollbild")
+        fullscreenButton.image = NSImage(systemSymbolName: "arrow.up.left.and.arrow.down.right", accessibilityDescription: "Full screen")
         fullscreenButton.imagePosition = .imageOnly
         let speaker = NSImageView()
-        speaker.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "Lautstärke")
+        speaker.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "Volume")
         speaker.contentTintColor = .secondaryLabelColor
-        meter.toolTip = "Pegel links / rechts"
+        meter.toolTip = "Level left / right"
 
         let stack = NSStackView(views: [recordButton, snapshotButton, Self.divider(), streamButton, Self.divider(), swapBox, speaker, volumeSlider, meter,
                                         Self.divider(), pinBox, fullscreenButton])
@@ -165,7 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         statusPill.addSubview(statusLabel)
 
         // Adressen des Streams (oben links, nur während des Streams sichtbar)
-        let panelTitle = NSTextField(labelWithString: "Stream im lokalen Netzwerk")
+        let panelTitle = NSTextField(labelWithString: "Streaming to the local network")
         panelTitle.font = .systemFont(ofSize: 12, weight: .semibold)
         panelTitle.textColor = .white
         var rows: [[NSView]] = []
@@ -181,7 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let grid = NSGridView(views: rows)
         grid.rowSpacing = 4
         grid.columnSpacing = 10
-        let panelHint = NSTextField(labelWithString: "In VLC: Netzwerk → Netzwerk-Stream öffnen")
+        let panelHint = NSTextField(labelWithString: "In VLC: Network → Open Network Stream")
         panelHint.font = .systemFont(ofSize: 11)
         panelHint.textColor = .secondaryLabelColor
         accessField.font = .systemFont(ofSize: 11)
@@ -265,11 +265,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func windowDidEnterFullScreen(_ notification: Notification) {
-        fullscreenButton.image = NSImage(systemSymbolName: "arrow.down.right.and.arrow.up.left", accessibilityDescription: "Vollbild beenden")
+        fullscreenButton.image = NSImage(systemSymbolName: "arrow.down.right.and.arrow.up.left", accessibilityDescription: "Exit full screen")
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
-        fullscreenButton.image = NSImage(systemSymbolName: "arrow.up.left.and.arrow.down.right", accessibilityDescription: "Vollbild")
+        fullscreenButton.image = NSImage(systemSymbolName: "arrow.up.left.and.arrow.down.right", accessibilityDescription: "Full screen")
         window.level = defaults.bool(forKey: "alwaysOnTop") ? .floating : .normal
     }
 
@@ -315,7 +315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                            attributes: [.foregroundColor: NSColor.systemRed, .font: font]))
         }
         if isStreaming {
-            let audience = viewers == 0 ? "" : " · \(viewers) Zuschauer"
+            let audience = viewers == 0 ? "" : " · \(viewers) \(viewers == 1 ? "viewer" : "viewers")"
             text.append(NSAttributedString(string: "● LIVE\(audience)   ",
                                            attributes: [.foregroundColor: NSColor.systemGreen, .font: font]))
         }
@@ -325,7 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func updateStats(fps: Double, width: Int, height: Int) {
-        modeText = fps < 1 ? "Kein Bild" : "\(width)×\(height) · \(Int(fps.rounded())) fps"
+        modeText = fps < 1 ? "No signal" : "\(width)×\(height) · \(Int(fps.rounded())) fps"
         updateStatus()
     }
 
@@ -349,7 +349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func updateRecordUI() {
-        recordButton.title = isRecording ? "Stopp" : "Aufnahme"
+        recordButton.title = isRecording ? "Stop" : "Record"
         recordButton.image = NSImage(systemSymbolName: isRecording ? "stop.circle.fill" : "record.circle",
                                      accessibilityDescription: nil)
         updateStatus()
@@ -370,9 +370,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.recordButton.isEnabled = true
                 self.updateRecordUI()
                 if let url {
-                    self.flash("Gespeichert: \(url.lastPathComponent)")
+                    self.flash("Saved: \(url.lastPathComponent)")
                 } else {
-                    self.flash("Aufnahme fehlgeschlagen")
+                    self.flash("Recording failed")
                 }
             }
         } else {
@@ -380,7 +380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             do {
                 url = try Self.newFileURL(in: Self.recordingsFolder(), ext: "mp4")
             } catch {
-                flash("Ordner „Filme“ nicht beschreibbar")
+                flash("Can't write to the Movies folder")
                 recordButton.isEnabled = true
                 return
             }
@@ -389,7 +389,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 guard let self else { return }
                 self.recordButton.isEnabled = true
                 if let error {
-                    self.flash("Aufnahme nicht möglich: \(error.localizedDescription)")
+                    self.flash("Can't record: \(error.localizedDescription)")
                     return
                 }
                 self.isRecording = true
@@ -416,7 +416,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             streamAddresses = nil
             viewers = 0
             updateStreamUI()
-            flash("Stream beendet")
+            flash("Stream stopped")
             return
         }
         guard streamStarting == false else { return }
@@ -433,10 +433,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.isStreaming = true
                 self.streamAddresses = addresses
                 self.viewers = 0
-                self.flash("Stream läuft – \(settings.videoBitRate / 1_000_000) Mbit/s, "
-                           + "DASH-Segmente \(StreamSettings.label(frames: settings.segmentFrames))")
+                self.flash("Streaming – \(settings.videoBitRate / 1_000_000) Mbit/s, "
+                           + "DASH segments \(StreamSettings.label(frames: settings.segmentFrames))")
             case .failure(let error):
-                self.flash("Stream nicht gestartet: \(error.localizedDescription)", seconds: 10)
+                self.flash("Stream didn't start: \(error.localizedDescription)", seconds: 10)
             }
             self.updateStreamUI()
         }
@@ -446,11 +446,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard let addresses = streamAddresses else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(addresses.summary, forType: .string)
-        flash("Stream-Adressen kopiert")
+        flash("Stream addresses copied")
     }
 
     private func updateStreamUI() {
-        streamButton.title = isStreaming ? "Stream beenden" : "Stream"
+        streamButton.title = isStreaming ? "Stop Stream" : "Stream"
         streamButton.contentTintColor = isStreaming ? .systemGreen : nil
         if let addresses = streamAddresses {
             tsField.stringValue = addresses.ts
@@ -472,13 +472,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func updateAccessField() {
         let list = accessList
         if let host = streamAddresses?.host, list.allows(address: host) == false {
-            accessField.stringValue = "Achtung: Dein Netz (\(host)) ist nicht freigegeben – Einstellungen ⌘,"
+            accessField.stringValue = "Warning: your network (\(host)) is not allowed – Settings ⌘,"
             accessField.textColor = .systemOrange
         } else if list.subnets.isEmpty {
-            accessField.stringValue = "Kein Netz freigegeben – nur dieser Mac · Einstellungen ⌘,"
+            accessField.stringValue = "No network allowed – this Mac only · Settings ⌘,"
             accessField.textColor = .systemOrange
         } else {
-            accessField.stringValue = "Zugriff nur aus: \(list.summary) · Einstellungen ⌘,"
+            accessField.stringValue = "Access only from: \(list.summary) · Settings ⌘,"
             accessField.textColor = .secondaryLabelColor
         }
     }
@@ -499,26 +499,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 guard let self else { return }
                 self.defaults.set(frames, forKey: "dashSegmentFrames")
                 if self.isStreaming {
-                    self.flash("Neue Segmentlänge gilt ab dem nächsten Start des Streams")
+                    self.flash("New segment length applies the next time streaming starts")
                 }
             }
             controller.onStreamBitRateChange = { [weak self] mbits in
                 guard let self else { return }
                 self.defaults.set(mbits, forKey: "streamBitRate")
                 if self.isStreaming {
-                    self.flash("Neue Stream-Bitrate gilt ab dem nächsten Start des Streams")
+                    self.flash("New stream bit rate applies the next time streaming starts")
                 }
             }
             controller.onRecordingBitRateChange = { [weak self] mbits in
                 guard let self else { return }
                 self.defaults.set(mbits, forKey: "recordingBitRate")
                 if self.isRecording {
-                    self.flash("Neue Aufnahme-Bitrate gilt ab der nächsten Aufnahme")
+                    self.flash("New recording bit rate applies to the next recording")
                 }
             }
             settingsController = controller
         }
-        // Bei „Immer im Vordergrund“ sonst hinter dem Hauptfenster
+        // Bei „Always on Top“ sonst hinter dem Hauptfenster
         settingsController?.window?.level = window.level
         settingsController?.showWindow(nil)
         settingsController?.window?.makeKeyAndOrderFront(nil)
@@ -529,7 +529,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let now = Date()
         if let last = lastRejectionNotice[host], now.timeIntervalSince(last) < 10 { return }
         lastRejectionNotice[host] = now
-        flash("Zugriff von \(host) abgelehnt – Netz unter Einstellungen freigeben", seconds: 8)
+        flash("Connection from \(host) refused – allow its network in Settings", seconds: 8)
     }
 
     @objc func showSnapshots(_ sender: Any?) {
@@ -540,21 +540,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         engine.snapshot { [weak self] snapshot in
             guard let self else { return }
             guard let snapshot else {
-                self.flash("Kein Bild für ein Bildschirmfoto")
+                self.flash("No video signal for a screenshot")
                 return
             }
             self.shutter.flash()
             do {
                 let url = try Self.newFileURL(in: Self.snapshotsFolder(), ext: "png")
                 try snapshot.png.write(to: url)
-                self.flash("Bildschirmfoto: \(url.lastPathComponent)")
+                self.flash("Screenshot: \(url.lastPathComponent)")
             } catch {
-                self.flash("Bildschirmfoto nicht gespeichert: \(error.localizedDescription)")
+                self.flash("Screenshot not saved: \(error.localizedDescription)")
             }
         }
     }
 
-    /// „Bearbeiten → Kopieren“ (⌘C), wenn kein Textfeld aktiv ist: aktuelles Bild kopieren
+    /// „Edit → Copy“ (⌘C), wenn kein Textfeld aktiv ist: aktuelles Bild kopieren
     @objc func copy(_ sender: Any?) {
         copySnapshot(sender)
     }
@@ -563,7 +563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         engine.snapshot { [weak self] snapshot in
             guard let self else { return }
             guard let snapshot else {
-                self.flash("Kein Bild zum Kopieren")
+                self.flash("No video signal to copy")
                 return
             }
             self.shutter.flash()
@@ -574,7 +574,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.writeObjects([item])
-            self.flash("Bild in die Zwischenablage kopiert")
+            self.flash("Frame copied to the clipboard")
         }
     }
 
@@ -618,10 +618,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private static func recordingsFolder() throws -> URL { try appFolder(.moviesDirectory) }
     private static func snapshotsFolder() throws -> URL { try appFolder(.picturesDirectory) }
 
-    /// „HDMI Capture 2026-10-23 um 21.55.12.png“; existiert der Name schon, wird „ 2“, „ 3“ … angehängt.
+    /// „HDMI Capture 2026-10-23 at 21.55.12.png“; existiert der Name schon, wird „ 2“, „ 3“ … angehängt.
     private static func newFileURL(in folder: URL, ext: String) -> URL {
         let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd 'um' HH.mm.ss"
+        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
         let base = "HDMI Capture \(formatter.string(from: Date()))"
         var url = folder.appendingPathComponent("\(base).\(ext)")
         var number = 2
@@ -646,67 +646,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
 
         _ = submenu("HDMI Capture") { m in
-            m.addItem(withTitle: "Über HDMI Capture", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+            m.addItem(withTitle: "About HDMI Capture", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
             m.addItem(.separator())
-            m.addItem(withTitle: "Einstellungen …", action: #selector(showSettings(_:)), keyEquivalent: ",").target = self
+            m.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",").target = self
             m.addItem(.separator())
-            m.addItem(withTitle: "HDMI Capture ausblenden", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-            let others = m.addItem(withTitle: "Andere ausblenden", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+            m.addItem(withTitle: "Hide HDMI Capture", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+            let others = m.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
             others.keyEquivalentModifierMask = [.command, .option]
-            m.addItem(withTitle: "Alle einblenden", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+            m.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
             m.addItem(.separator())
-            m.addItem(withTitle: "HDMI Capture beenden", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+            m.addItem(withTitle: "Quit HDMI Capture", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         }
-        _ = submenu("Aufnahme") { m in
-            let record = m.addItem(withTitle: "Aufnahme starten", action: #selector(toggleRecording(_:)), keyEquivalent: "r")
+        _ = submenu("Recording") { m in
+            let record = m.addItem(withTitle: "Start Recording", action: #selector(toggleRecording(_:)), keyEquivalent: "r")
             record.target = self
             record.tag = 1
             m.addItem(.separator())
-            m.addItem(withTitle: "Bildschirmfoto sichern", action: #selector(takeSnapshot(_:)), keyEquivalent: "s").target = self
-            m.addItem(withTitle: "Bild kopieren", action: #selector(copySnapshot(_:)), keyEquivalent: "").target = self
+            m.addItem(withTitle: "Save Screenshot", action: #selector(takeSnapshot(_:)), keyEquivalent: "s").target = self
+            m.addItem(withTitle: "Copy Frame", action: #selector(copySnapshot(_:)), keyEquivalent: "").target = self
             m.addItem(.separator())
-            m.addItem(withTitle: "Aufnahmeordner zeigen", action: #selector(showRecordings(_:)), keyEquivalent: "").target = self
-            m.addItem(withTitle: "Bildschirmfotos zeigen", action: #selector(showSnapshots(_:)), keyEquivalent: "").target = self
+            m.addItem(withTitle: "Show Recordings Folder", action: #selector(showRecordings(_:)), keyEquivalent: "").target = self
+            m.addItem(withTitle: "Show Screenshots Folder", action: #selector(showSnapshots(_:)), keyEquivalent: "").target = self
         }
         // Bearbeiten: nötig für Textfelder (Einstellungen). ⌘C ohne Textauswahl kopiert das aktuelle Bild.
-        _ = submenu("Bearbeiten") { m in
-            m.addItem(withTitle: "Widerrufen", action: Selector(("undo:")), keyEquivalent: "z")
-            let redo = m.addItem(withTitle: "Wiederholen", action: Selector(("redo:")), keyEquivalent: "z")
+        _ = submenu("Edit") { m in
+            m.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+            let redo = m.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
             redo.keyEquivalentModifierMask = [.command, .shift]
             m.addItem(.separator())
-            m.addItem(withTitle: "Ausschneiden", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-            m.addItem(withTitle: "Kopieren", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-            m.addItem(withTitle: "Einsetzen", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-            m.addItem(withTitle: "Alles auswählen", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+            m.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+            m.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+            m.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+            m.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         }
         _ = submenu("Stream") { m in
-            let toggle = m.addItem(withTitle: "Stream starten", action: #selector(toggleStreaming(_:)), keyEquivalent: "k")
+            let toggle = m.addItem(withTitle: "Start Streaming", action: #selector(toggleStreaming(_:)), keyEquivalent: "k")
             toggle.target = self
             toggle.tag = 4
-            let copy = m.addItem(withTitle: "Stream-Adressen kopieren", action: #selector(copyStreamAddresses(_:)), keyEquivalent: "")
+            let copy = m.addItem(withTitle: "Copy Stream Addresses", action: #selector(copyStreamAddresses(_:)), keyEquivalent: "")
             copy.target = self
             copy.tag = 5
         }
-        _ = submenu("Ton") { m in
-            let swap = m.addItem(withTitle: "Links/Rechts tauschen", action: #selector(toggleSwap(_:)), keyEquivalent: "l")
+        _ = submenu("Audio") { m in
+            let swap = m.addItem(withTitle: "Swap Left/Right", action: #selector(toggleSwap(_:)), keyEquivalent: "l")
             swap.target = self
             swap.tag = 2
             m.addItem(.separator())
-            m.addItem(withTitle: "Lauter", action: #selector(volumeUp(_:)), keyEquivalent: "\u{F700}").target = self
-            m.addItem(withTitle: "Leiser", action: #selector(volumeDown(_:)), keyEquivalent: "\u{F701}").target = self
+            m.addItem(withTitle: "Volume Up", action: #selector(volumeUp(_:)), keyEquivalent: "\u{F700}").target = self
+            m.addItem(withTitle: "Volume Down", action: #selector(volumeDown(_:)), keyEquivalent: "\u{F701}").target = self
         }
-        _ = submenu("Darstellung") { m in
-            let full = m.addItem(withTitle: "Vollbild", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        _ = submenu("View") { m in
+            let full = m.addItem(withTitle: "Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
             full.keyEquivalentModifierMask = [.command, .control]
-            let pin = m.addItem(withTitle: "Immer im Vordergrund", action: #selector(togglePin(_:)), keyEquivalent: "t")
+            let pin = m.addItem(withTitle: "Always on Top", action: #selector(togglePin(_:)), keyEquivalent: "t")
             pin.target = self
             pin.tag = 3
         }
-        let windowMenu = submenu("Fenster") { m in
-            m.addItem(withTitle: "Im Dock ablegen", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
-            m.addItem(withTitle: "Zoomen", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        let windowMenu = submenu("Window") { m in
+            m.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+            m.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
             m.addItem(.separator())
-            m.addItem(withTitle: "Alle nach vorne bringen", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+            m.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         }
         NSApp.mainMenu = mainMenu
         NSApp.windowsMenu = windowMenu
@@ -714,11 +714,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.tag {
-        case 1: menuItem.title = isRecording ? "Aufnahme beenden" : "Aufnahme starten"
+        case 1: menuItem.title = isRecording ? "Stop Recording" : "Start Recording"
         case 2: menuItem.state = defaults.bool(forKey: "swapChannels") ? .on : .off
         case 3: menuItem.state = defaults.bool(forKey: "alwaysOnTop") ? .on : .off
         case 4:
-            menuItem.title = isStreaming ? "Stream beenden" : "Stream starten"
+            menuItem.title = isStreaming ? "Stop Streaming" : "Start Streaming"
             return streamStarting == false
         case 5: return isStreaming
         default: break

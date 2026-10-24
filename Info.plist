@@ -17,7 +17,7 @@
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>CFBundleDevelopmentRegion</key>
-	<string>de</string>
+	<string>en</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>LSMinimumSystemVersion</key>
@@ -29,10 +29,10 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSCameraUsageDescription</key>
-	<string>HDMI Capture zeigt das Bild deiner HDMI-Capture-Karte an.</string>
+	<string>HDMI Capture shows the picture from your HDMI capture card.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>HDMI Capture gibt den Ton deiner HDMI-Capture-Karte wieder.</string>
+	<string>HDMI Capture plays the sound from your HDMI capture card.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>HDMI Capture stellt den Stream für Geräte im lokalen Netzwerk bereit.</string>
+	<string>HDMI Capture makes the stream available to devices on your local network.</string>
 </dict>
 </plist>

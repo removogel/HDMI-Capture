@@ -18,7 +18,7 @@ enum StreamError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .portUnavailable(let port): return "Port \(port) ist belegt oder nicht verfügbar"
+        case .portUnavailable(let port): return "Port \(port) is in use or unavailable"
         }
     }
 }
@@ -143,9 +143,9 @@ final class StreamService {
     }
 
     private func rejected(_ endpoint: NWEndpoint) {
-        var host = "unbekannt"
+        var host = "unknown"
         if case let .hostPort(address, _) = endpoint { host = "\(address)" }
-        debugLog("Zugriff von \(host) abgelehnt (nicht in der Zugriffsliste)")
+        debugLog("Connection from \(host) refused (not in the access list)")
         onRejected?(host)
     }
 
@@ -392,11 +392,11 @@ final class StreamService {
         var rows = ""
         for (name, url) in [("MPEG-TS", addresses.ts), ("MPEG-DASH", addresses.dash), ("RTSP", addresses.rtsp)] {
             rows += "<tr><th>\(name)</th><td><code>\(escape(url))</code></td>"
-            rows += "<td><a href=\"\(escape(vlcLink(url)))\">In VLC öffnen</a></td></tr>\n"
+            rows += "<td><a href=\"\(escape(vlcLink(url)))\">Open in VLC</a></td></tr>\n"
         }
         return """
         <!doctype html>
-        <html lang="de">
+        <html lang="en">
         <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -420,15 +420,15 @@ final class StreamService {
         <h1>HDMI Capture</h1>
         <div class="player">
         <video id="video" controls playsinline autoplay muted></video>
-        <button id="unmute" type="button">Ton einschalten</button>
+        <button id="unmute" type="button">Unmute</button>
         </div>
-        <p id="stats">Lade dash.js …</p>
-        <h2>Adressen für VLC und andere Player</h2>
-        <p>In VLC: <b>Netzwerk → Netzwerk-Stream öffnen</b> und eine der Adressen eingeben.</p>
+        <p id="stats">Loading dash.js …</p>
+        <h2>Addresses for VLC and other players</h2>
+        <p>In VLC: <b>Network → Open Network Stream</b> and enter one of the addresses.</p>
         <table>
         \(rows)</table>
-        <p>MPEG-TS hat die kürzeste Verzögerung. RTSP läuft über TCP. Der Player oben nutzt MPEG-DASH mit
-        dash.js \(Self.dashJSVersion); dafür braucht dieses Gerät Internetzugang.</p>
+        <p>MPEG-TS has the shortest delay. RTSP runs over TCP. The player above uses MPEG-DASH with
+        dash.js \(Self.dashJSVersion), so this device needs internet access.</p>
         <script>
         (function () {
           var video = document.getElementById('video');
@@ -438,10 +438,10 @@ final class StreamService {
             'https://cdn.dashjs.org/v\(Self.dashJSVersion)/modern/umd/dash.all.min.js',
             'https://cdn.dashjs.org/v\(Self.dashJSVersion)/legacy/umd/dash.all.min.js'
           ];
-          function seconds(value) { return value.toFixed(1).replace('.', ',') + ' s'; }
+          function seconds(value) { return value.toFixed(1) + ' s'; }
           function load(index) {
             if (index >= sources.length) {
-              stats.textContent = 'dash.js konnte nicht geladen werden – dieses Gerät braucht Internetzugang. Alternativ eine der Adressen unten in VLC öffnen.';
+              stats.textContent = 'Could not load dash.js – this device needs internet access. Alternatively, open one of the addresses below in VLC.';
               return;
             }
             var script = document.createElement('script');
@@ -458,18 +458,18 @@ final class StreamService {
             } catch (e) {}
             player.on(dashjs.MediaPlayer.events.ERROR, function (event) {
               var error = event && event.error;
-              stats.textContent = 'Fehler: ' + (error && error.message ? error.message : 'unbekannt');
+              stats.textContent = 'Error: ' + (error && error.message ? error.message : 'unknown');
             });
             player.initialize(video, 'dash/live.mpd', true);
             setInterval(function () {
               var parts = [];
               try {
                 var latency = player.getCurrentLiveLatency();
-                if (latency > 0) { parts.push('Verzögerung ' + seconds(latency)); }
+                if (latency > 0) { parts.push('Latency ' + seconds(latency)); }
               } catch (e) {}
               try {
                 var buffer = player.getBufferLength('video');
-                if (buffer >= 0) { parts.push('Puffer ' + seconds(buffer)); }
+                if (buffer >= 0) { parts.push('Buffer ' + seconds(buffer)); }
               } catch (e) {}
               if (video.videoWidth) { parts.push(video.videoWidth + '×' + video.videoHeight); }
               if (parts.length) { stats.textContent = parts.join(' · '); }

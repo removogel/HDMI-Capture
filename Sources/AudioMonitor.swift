@@ -68,12 +68,12 @@ final class AudioMonitor {
             try engine.start()
             isRunning = true
         } catch {
-            debugLog("Audio-Ausgabe startet nicht: \(error)")
+            debugLog("Audio output failed to start: \(error)")
         }
         // Ausgabegerät gewechselt (z. B. Kopfhörer) → Engine neu starten
         observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
             guard let self else { return }
-            do { try self.engine.start() } catch { debugLog("Audio-Neustart fehlgeschlagen: \(error)") }
+            do { try self.engine.start() } catch { debugLog("Audio restart failed: \(error)") }
         }
     }
 

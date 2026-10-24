@@ -115,9 +115,11 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 
 ## Conventions
 
-- UI strings, log messages and code comments are German. README and CLAUDE.md are English.
+- UI strings (menus, HUD, settings, status page) and log messages are English; code comments are German.
+  README and CLAUDE.md are English. The app is not localized; use plain English string literals.
 - Keep the app dependency-free and buildable with plain `swiftc`. Don't add an Xcode project or SwiftPM
   package unless asked.
 - Recordings go to `~/Movies/HDMI Capture/` (`.mp4`), screenshots to `~/Pictures/HDMI Capture/` (`.png`). Both are
-  named `HDMI Capture <date> um <time>`, with ` 2`, ` 3` … appended if the name already exists.
+  named `HDMI Capture <date> at <time>` (e.g. `HDMI Capture 2026-10-24 at 18.32.10.png`), with ` 2`, ` 3` …
+  appended if the name already exists.
 - `build/` is ignored by Git; never commit build output.

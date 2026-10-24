@@ -56,7 +56,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private var videoH = 0
     private var peakL: Float = 0
     private var peakR: Float = 0
-    private var audioInfo = "kein Ton"
+    private var audioInfo = "no audio"
     private var recorder: Recorder?
     private var snapshotRequests: [SnapshotRequest] = []
     private var stream: StreamService?
@@ -69,7 +69,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         if videoOK == false {
-                            completion("Kein Kamerazugriff – in Systemeinstellungen › Datenschutz & Sicherheit › Kamera erlauben")
+                            completion("No camera access – allow it in System Settings › Privacy & Security › Camera")
                             return
                         }
                         completion(self.configure(audioAllowed: audioOK))
@@ -134,7 +134,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     private func configure(audioAllowed: Bool) -> String? {
-        guard let m = Self.findVideoMode() else { return "Kein Capture-Gerät gefunden" }
+        guard let m = Self.findVideoMode() else { return "No capture device found" }
         mode = m
         var note: String?
 
@@ -152,7 +152,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
 
         if audioAllowed == false {
-            note = "Kein Mikrofonzugriff – Ton aus"
+            note = "No microphone access – audio off"
         } else if let audioDevice = Self.findAudioDevice() {
             do {
                 let input = try AVCaptureDeviceInput(device: audioDevice)
@@ -160,13 +160,13 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                 audioOutput.setSampleBufferDelegate(self, queue: queue)
                 if session.canAddOutput(audioOutput) { session.addOutput(audioOutput) }
             } catch {
-                note = "Ton: \(error.localizedDescription)"
+                note = "Audio: \(error.localizedDescription)"
             }
         } else {
-            note = "Audiogerät „USB Digital Audio“ nicht gefunden"
+            note = "Audio device “USB Digital Audio” not found"
             let names = AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio,
                                                          position: .unspecified).devices.map(\.localizedName)
-            debugLog("Gefundene Audiogeräte: \(names.joined(separator: ", "))")
+            debugLog("Audio devices found: \(names.joined(separator: ", "))")
         }
         applyFormat()
         session.commitConfiguration()
@@ -184,7 +184,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             self.applyFormat()
             let d = CMVideoFormatDescriptionGetDimensions(m.device.activeFormat.formatDescription)
             let fps = 1 / CMTimeGetSeconds(m.device.activeVideoMinFrameDuration)
-            debugLog("Gerät „\(m.device.localizedName)“, aktiv \(d.width)x\(d.height) @ \(String(format: "%.2f", fps)) fps")
+            debugLog("Device “\(m.device.localizedName)”, active format \(d.width)x\(d.height) @ \(String(format: "%.2f", fps)) fps")
         }
         return note
     }
@@ -221,7 +221,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             if let range = m.range { m.device.activeVideoMinFrameDuration = range.minFrameDuration }
             m.device.unlockForConfiguration()
         } catch {
-            debugLog("Gerät nicht konfigurierbar: \(error)")
+            debugLog("Can't configure the device: \(error)")
         }
     }
 
@@ -275,7 +275,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                let png = Self.pngData(cgImage) {
                 result = Snapshot(image: cgImage, png: png)
             } else {
-                debugLog("Standbild konnte nicht erzeugt werden")
+                debugLog("Couldn't create the still image")
                 result = nil
             }
             for request in requests {
@@ -365,7 +365,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         } else {
             rate = asbd.mSampleRate
         }
-        audioInfo = "\(Int(asbd.mSampleRate)) Hz, \(channels) Kanal, \(isFloat ? "Float" : "Int") \(asbd.mBitsPerChannel) Bit → \(Int(rate)) Hz stereo"
+        audioInfo = "\(Int(asbd.mSampleRate)) Hz, \(channels) ch, \(isFloat ? "Float" : "Int") \(asbd.mBitsPerChannel) bit → \(Int(rate)) Hz stereo"
         guard samples.count >= 2 else { return }
 
         if swapLR {
@@ -412,7 +412,7 @@ final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             if let stats = onStats { Self.onMain { stats(fps, w, h) } }
             if now - lastDebug >= 10 {
                 lastDebug = now
-                debugLog("Video \(w)x\(h) @ \(String(format: "%.1f", fps)) fps | Ton: \(audioInfo) | Puffer \(monitor.bufferedMilliseconds) ms")
+                debugLog("Video \(w)x\(h) @ \(String(format: "%.1f", fps)) fps | Audio: \(audioInfo) | Buffer \(monitor.bufferedMilliseconds) ms")
             }
         }
     }
