@@ -9,6 +9,8 @@
    xattr -dr com.apple.quarantine "/Applications/HDMI Capture.app"
    ```
 4. Allow camera and microphone access when asked.
+5. When you start streaming, macOS may ask whether HDMI Capture may accept incoming network connections –
+   allow it, otherwise other devices can't reach the stream.
 
 **Requirements:** macOS 14 Sonoma or newer, Apple Silicon or Intel, a USB HDMI capture stick with the
 MacroSilicon MS2109 chip. No other software (ffmpeg, SoX …) is needed.
