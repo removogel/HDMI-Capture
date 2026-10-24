@@ -36,7 +36,7 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
 | `Sources/AudioMonitor.swift` | Live audio playback: `AVAudioEngine` + `AVAudioSourceNode` reading a lock-protected ring buffer (target 50 ms, trimmed back above 250 ms) |
 | `Sources/Recorder.swift` | `AVAssetWriter` MP4: H.264 from the capture sample buffers, AAC from rebuilt stereo PCM buffers with gap-free timestamps |
 | `Sources/Views.swift` | `PreviewView` (`AVCaptureVideoPreviewLayer`, mouse/Esc handling), `ShutterView` (screenshot flash, click-through) and `LevelMeterView` |
-| `Sources/StreamService.swift` | Network stream: wires encoder → TS/DASH/RTSP, HTTP routes, waiting DASH requests, viewer count, local IP, status page |
+| `Sources/StreamService.swift` | Network stream: wires encoder → TS/DASH/RTSP, HTTP routes, waiting DASH requests, viewer count, local IP, status page with dash.js player |
 | `Sources/StreamEncoder.swift` | `StreamSettings` (segment length, keyframe interval, bit rates) and the encoder: VideoToolbox H.264 (no B-frames, forced keyframes) and AAC-LC via `AVAudioConverter`; media time = seconds since first video frame |
 | `Sources/TSMuxer.swift` | MPEG-2 TS: PAT/PMT before each keyframe, PES with PTS, PCR on video, AAC as ADTS |
 | `Sources/MP4.swift` | fMP4/CMAF boxes: init segments (`avc1`/`avcC`, `mp4a`/`esds`) and media segments (`moof`+`mdat`) |
@@ -88,6 +88,7 @@ Native macOS app (Swift, AppKit, AVFoundation) for USB HDMI capture sticks with 
   against `NetworkAccessList` (UserDefaults key `streamAllowedNetworks`, default `192.168.x.x` / `10.x.x.x`);
   others are cancelled before any data is read. Loopback is always allowed, IPv4-mapped IPv6 is treated as
   IPv4. Changing the list closes connections that are no longer allowed. No authentication or encryption.
+- Status page `/`: dash.js player (`StreamService.dashJSVersion`, loaded from cdn.dashjs.org, modern build with legacy fallback; the app itself bundles nothing) with live latency/buffer readout, muted autoplay plus an unmute button, and the address table. Its latency readout is relative to `availabilityStartTime`, which is set when the first encoded frame arrives, so capture/encoding delay (~0.1–0.2 s) isn't included. Page logic was checked in headless Chromium with a dash.js stub; real dash.js playback isn't verified here (no CDN access, no H.264 in Chromium).
 - The app has an Edit menu so text fields work; ⌘C (`copy:`) without a text field copies the current frame.
 - New TS/RTSP viewers start at the next keyframe. A client with more than 4 MB unsent data is paused until the
   next keyframe (frames are dropped, memory stays bounded).

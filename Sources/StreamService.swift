@@ -31,6 +31,8 @@ final class StreamService {
     static let rtspPort: UInt16 = 8554
     /// Ab so vielen unbestätigten Bytes gilt ein Client als zu langsam
     static let slowClientBytes = 4_000_000
+    /// dash.js-Version für den Player auf der Infoseite (von cdn.dashjs.org)
+    static let dashJSVersion = "5.2.1"
 
     let encoder: StreamEncoder
     /// Zuschauerzahl hat sich geändert (Aufruf auf der Stream-Queue)
@@ -401,7 +403,13 @@ final class StreamService {
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>HDMI Capture</title>
         <style>
-        body { font: 16px -apple-system, system-ui, sans-serif; margin: 2em auto; max-width: 46em; padding: 0 16px; background: #111; color: #eee; }
+        body { font: 16px -apple-system, system-ui, sans-serif; margin: 1.5em auto; max-width: 60em; padding: 0 16px; background: #111; color: #eee; }
+        h1 { font-size: 1.4em; margin: 0 0 .6em; }
+        h2 { font-size: 1.1em; margin: 1.8em 0 .4em; }
+        .player { position: relative; background: #000; border-radius: 8px; overflow: hidden; aspect-ratio: 16 / 9; }
+        video { width: 100%; height: 100%; display: block; background: #000; }
+        #unmute { position: absolute; top: 12px; right: 12px; font: inherit; font-size: 14px; padding: .45em .9em; border: 0; border-radius: 6px; background: rgba(255,255,255,.88); color: #000; cursor: pointer; }
+        #stats { font-variant-numeric: tabular-nums; color: #9c9; margin: .6em 0 0; min-height: 1.4em; }
         table { border-collapse: collapse; width: 100%; }
         th, td { text-align: left; padding: .6em .5em; border-bottom: 1px solid #333; vertical-align: top; }
         code { word-break: break-all; }
@@ -411,10 +419,71 @@ final class StreamService {
         </head>
         <body>
         <h1>HDMI Capture</h1>
-        <p>Der Stream läuft. In VLC: <b>Netzwerk → Netzwerk-Stream öffnen</b> und eine der Adressen eingeben.</p>
+        <div class="player">
+        <video id="video" controls playsinline autoplay muted></video>
+        <button id="unmute" type="button">Ton einschalten</button>
+        </div>
+        <p id="stats">Lade dash.js …</p>
+        <h2>Adressen für VLC und andere Player</h2>
+        <p>In VLC: <b>Netzwerk → Netzwerk-Stream öffnen</b> und eine der Adressen eingeben.</p>
         <table>
         \(rows)</table>
-        <p>MPEG-TS hat die kürzeste Verzögerung. RTSP läuft über TCP.</p>
+        <p>MPEG-TS hat die kürzeste Verzögerung. RTSP läuft über TCP. Der Player oben nutzt MPEG-DASH mit
+        dash.js \(Self.dashJSVersion); dafür braucht dieses Gerät Internetzugang.</p>
+        <script>
+        (function () {
+          var video = document.getElementById('video');
+          var stats = document.getElementById('stats');
+          var unmute = document.getElementById('unmute');
+          var sources = [
+            'https://cdn.dashjs.org/v\(Self.dashJSVersion)/modern/umd/dash.all.min.js',
+            'https://cdn.dashjs.org/v\(Self.dashJSVersion)/legacy/umd/dash.all.min.js'
+          ];
+          function seconds(value) { return value.toFixed(1).replace('.', ',') + ' s'; }
+          function load(index) {
+            if (index >= sources.length) {
+              stats.textContent = 'dash.js konnte nicht geladen werden – dieses Gerät braucht Internetzugang. Alternativ eine der Adressen unten in VLC öffnen.';
+              return;
+            }
+            var script = document.createElement('script');
+            script.src = sources[index];
+            script.onload = start;
+            script.onerror = function () { load(index + 1); };
+            document.head.appendChild(script);
+          }
+          function start() {
+            var player = dashjs.MediaPlayer().create();
+            try {
+              // Latenzziel kommt aus dem MPD (ServiceDescription); bei Rückstand leicht schneller abspielen
+              player.updateSettings({ streaming: { liveCatchup: { enabled: true } } });
+            } catch (e) {}
+            player.on(dashjs.MediaPlayer.events.ERROR, function (event) {
+              var error = event && event.error;
+              stats.textContent = 'Fehler: ' + (error && error.message ? error.message : 'unbekannt');
+            });
+            player.initialize(video, 'dash/live.mpd', true);
+            setInterval(function () {
+              var parts = [];
+              try {
+                var latency = player.getCurrentLiveLatency();
+                if (latency > 0) { parts.push('Verzögerung ' + seconds(latency)); }
+              } catch (e) {}
+              try {
+                var buffer = player.getBufferLength('video');
+                if (buffer >= 0) { parts.push('Puffer ' + seconds(buffer)); }
+              } catch (e) {}
+              if (video.videoWidth) { parts.push(video.videoWidth + '×' + video.videoHeight); }
+              if (parts.length) { stats.textContent = parts.join(' · '); }
+            }, 500);
+          }
+          unmute.addEventListener('click', function () {
+            video.muted = false;
+            video.play();
+            unmute.style.display = 'none';
+          });
+          load(0);
+        })();
+        </script>
         </body>
         </html>
         """

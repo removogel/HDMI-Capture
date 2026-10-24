@@ -20,7 +20,7 @@ Click **Stream** in the control bar (or press ⌘K). The addresses appear in the
 | RTSP | `rtsp://<mac-ip>:8554/live` | RTP over TCP (interleaved); UDP is refused, VLC and ffmpeg switch automatically |
 
 In VLC (iPad, iPhone, Mac): **Network → Open Network Stream** and enter one of the addresses.
-`http://<mac-ip>:8080/` shows a small page with all addresses and "Open in VLC" links.
+`http://<mac-ip>:8080/` opens a page with a built-in **dash.js player** (it shows the live latency and buffer level) plus all addresses with "Open in VLC" links. The player loads dash.js 5.2.1 from `cdn.dashjs.org`, so the viewing device needs internet access; the stream itself stays in the local network.
 The stream uses H.264 (about 6 Mbit/s for 1080p30) and AAC stereo. The status shows `LIVE` and the number of viewers.
 
 macOS may ask whether HDMI Capture may accept incoming network connections or access the local network; allow it.
