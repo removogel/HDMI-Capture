@@ -63,6 +63,10 @@ source outputs 60 Hz. Stream and recordings each have their own **codec** and **
 
 Stream settings apply the next time streaming starts, recording settings to the next recording.
 
+If the picture stays black: copy-protected content (HDCP), for example from streaming apps, can stay black – the
+source and the capture stick decide that, the app can't change it. If the picture doesn't come back after changing
+the frame rate or the input device, quit and restart the app. The Settings window shows the same hint.
+
 ### Who can watch
 
 The stream servers only run while streaming is switched on; nothing listens when the app is closed or

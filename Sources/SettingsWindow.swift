@@ -62,6 +62,20 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
         return label
     }
 
+    /// Hinweis mit fettem Anfang, z. B. „Black picture?“
+    private static func note(_ title: String, _ text: String) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: "")
+        let small = NSFont.systemFont(ofSize: 11)
+        let attributed = NSMutableAttributedString(string: title + " ",
+                                                   attributes: [.font: NSFont.boldSystemFont(ofSize: 11),
+                                                                .foregroundColor: NSColor.labelColor])
+        attributed.append(NSAttributedString(string: text, attributes: [.font: small,
+                                                                         .foregroundColor: NSColor.secondaryLabelColor]))
+        label.attributedStringValue = attributed
+        label.preferredMaxLayoutWidth = width - 40
+        return label
+    }
+
     private static func separator() -> NSBox {
         let box = NSBox()
         box.boxType = .separator
@@ -158,10 +172,14 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
             + "HEVC needs roughly half the bit rate of H.264 for the same picture. VLC, QuickTime and Safari play it, "
             + "Firefox doesn't (DASH). 16 Mbit/s is usually fine over Wi-Fi, 30 Mbit/s is better suited to a cable or "
             + "good reception. Stream settings apply the next time streaming starts, recording settings to the next recording.")
+        let blackPictureNote = Self.note("Black picture?",
+            "Copy-protected content (HDCP), for example from streaming apps, can stay black. The source and the "
+            + "capture stick decide that; the app can't change it. If the picture doesn't come back after changing "
+            + "the frame rate or the input device, quit and restart HDMI Capture.")
 
         let stack = NSStackView(views: [accessTitle, accessExplanation, scrollView, statusLabel, resetButton,
                                         Self.separator(), segmentTitle, segmentPopup, segmentExplanation,
-                                        Self.separator(), videoTitle, videoGrid, videoExplanation])
+                                        Self.separator(), videoTitle, videoGrid, videoExplanation, blackPictureNote])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
@@ -177,7 +195,8 @@ final class SettingsWindowController: NSWindowController, NSTextViewDelegate {
             scrollView.heightAnchor.constraint(equalToConstant: 130),
         ]
         for view in stack.arrangedSubviews where view is NSBox || view === scrollView || view === statusLabel
-            || view === accessExplanation || view === segmentExplanation || view === videoExplanation {
+            || view === accessExplanation || view === segmentExplanation || view === videoExplanation
+            || view === blackPictureNote {
             constraints.append(view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40))
         }
         NSLayoutConstraint.activate(constraints)
